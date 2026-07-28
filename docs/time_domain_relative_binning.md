@@ -211,23 +211,6 @@ python -c "import lalsimulation; print(lalsimulation.SimIMRPhenomT_neha_truncate
 python -c "from bilby.gw.waveforms_td import IMRPhenomTHMWaveform; print(IMRPhenomTHMWaveform)"
 ```
 
-## Running the tests
-
-```bash
-# No LAL required -- pure math and mocked-waveform tests.
-pytest test/gw/likelihood/time_domain/ test/gw/noise_acf/ -v
-```
-
-These cover the Gohberg-Semencul solver (checked against a dense
-Toeplitz-matrix inverse), PSD patching, bin-placement geometry, and
-algebraic self-consistency of the relative-binning summary data. They
-do **not** exercise the `IMRPhenomT*_neha` waveform calls themselves
-(no LAL dependency); once the custom lalsuite fork is built, compare
-`RelativeBinningTimeDomainLikelihood22` against
-`ExactTimeDomainLikelihood` directly (as in the original repository's
-`Comparison_between_relbin_and_exact_log_likelihood.ipynb`) to validate
-the full pipeline end-to-end.
-
 ## Running the examples
 
 ```bash

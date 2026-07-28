@@ -17,3 +17,4 @@ MANIFEST
 .idea/*
 bilby/_version.py
 uv.lock
+.DS_Store

@@ -4,4 +4,6 @@ from .waveform_generator import WaveformGenerator, LALCBCWaveformGenerator
 from .likelihood import GravitationalWaveTransient
 from .detector import calibration
 from . import compat
+from . import noise_acf
+from . import waveforms_td
 

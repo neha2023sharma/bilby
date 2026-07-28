@@ -38,7 +38,10 @@ echo "==> Checking build dependencies..."
 missing=()
 command -v autoconf  &>/dev/null || missing+=(autoconf)
 command -v automake  &>/dev/null || missing+=(automake)
-command -v libtool   &>/dev/null || missing+=(libtool)
+# On Debian/Ubuntu the "libtool" package only installs `libtoolize`; the
+# `libtool` script itself is generated per-project by autoreconf. Check for
+# libtoolize there, and for a `libtool` binary elsewhere (e.g. Homebrew).
+{ command -v libtoolize &>/dev/null || command -v libtool &>/dev/null; } || missing+=(libtool)
 command -v swig      &>/dev/null || missing+=(swig)
 command -v gsl-config &>/dev/null || missing+=(gsl)
 pkg-config --exists fftw3 2>/dev/null || missing+=(fftw)
@@ -49,7 +52,9 @@ if [ ${#missing[@]} -gt 0 ]; then
         brew install "${missing[@]}"
     elif [ "$UNAME" = "Linux" ]; then
         echo "==> Installing via apt: build-essential autoconf automake libtool swig libgsl-dev libfftw3-dev pkg-config"
-        sudo apt-get update
+        # Don't let unrelated broken/third-party apt sources (e.g. an
+        # unrelated nodesource entry) abort the whole script.
+        sudo apt-get update || true
         sudo apt-get install -y build-essential autoconf automake libtool swig \
             libgsl-dev libfftw3-dev pkg-config
     else
@@ -70,8 +75,13 @@ mkdir -p "$BUILD_DIR"
 if [ -d "$CLONE_DIR/.git" ]; then
     echo "==> lalsuite already cloned at $CLONE_DIR"
 else
-    echo "==> Cloning lalsuite fork..."
-    git clone "$LAL_FORK" "$CLONE_DIR"
+    echo "==> Cloning lalsuite fork (shallow, branch-targeted)..."
+    git clone --branch Edits_for_TD_heterodyning --single-branch --depth 1 \
+        "$LAL_FORK" "$CLONE_DIR"
+fi
+if ! git -C "$CLONE_DIR" cat-file -e "$LAL_COMMIT" 2>/dev/null; then
+    echo "==> Pinned commit not in shallow history, fetching it directly..."
+    git -C "$CLONE_DIR" fetch --depth 1 origin "$LAL_COMMIT"
 fi
 git -C "$CLONE_DIR" checkout "$LAL_COMMIT"
 echo "==> At commit: $(git -C "$CLONE_DIR" rev-parse HEAD)"

@@ -701,6 +701,7 @@ class SetFiducialParameters(ExactTimeDomainLikelihood):
         fmin=10,
         fref=10,
         parameters_to_be_updated=["chirp_mass", "mass_ratio"],
+        frame="geocent",
     ):
         super().__init__(
             time,
@@ -712,7 +713,7 @@ class SetFiducialParameters(ExactTimeDomainLikelihood):
             Noise,
             fmin,
             fref,
-            frame="geocent",
+            frame=frame,
         )
         self.fiducial_parameters = fiducial_parameters.copy()
         self.priors = priors.copy()

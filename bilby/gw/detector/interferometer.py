@@ -14,6 +14,13 @@ from ..geometry import (
 from .calibration import Recalibrate
 from .geometry import InterferometerGeometry
 from .strain_data import InterferometerStrainData
+from ..time_domain_utils import (
+    align_peak_to_sample,
+    place_time_domain_signal,
+    time_domain_matched_filter_snr,
+    time_domain_noise_weighted_inner_product,
+    time_domain_optimal_snr_squared,
+)
 from ..conversion import generate_all_bbh_parameters
 
 
@@ -93,6 +100,7 @@ class Interferometer(object):
             maximum_frequency=maximum_frequency)
         self.meta_data = dict(name=name)
         self.reference_time = None
+        self._autocovariance_function = None
 
     def __eq__(self, other):
         if self.name == other.name and \
@@ -263,6 +271,108 @@ class Interferometer(object):
             sampling_frequency=sampling_frequency, duration=duration,
             start_time=start_time)
 
+    def set_strain_data_from_power_spectral_density_time_domain(
+            self, sampling_frequency, duration, start_time=0, *, random_state=None):
+        """ Set the `Interferometer.strain_data` to a time-domain noise
+        realisation of the power spectral density, with no frequency mask and
+        no window.
+
+        See :code:`InterferometerStrainData.set_from_power_spectral_density_time_domain`.
+
+        Parameters
+        ==========
+        sampling_frequency: float
+            The sampling frequency (in Hz)
+        duration: float
+            The data duration (in s)
+        start_time: float
+            The GPS start-time of the data
+        """
+        self.strain_data.set_from_power_spectral_density_time_domain(
+            self.power_spectral_density, sampling_frequency=sampling_frequency,
+            duration=duration, start_time=start_time, random_state=random_state)
+
+    def downsample_strain_data(self, sampling_frequency, **kwargs):
+        """ Downsample the time-domain strain data, as the :code:`ringdown`
+        package's :code:`Data.condition` does.
+
+        Supply data LONGER than the segment you want to analyse: with the
+        default trim=0.25 only the middle half of the input is kept.
+        See :code:`InterferometerStrainData.downsample` for all arguments
+        (preserve_time, minimum_frequency, maximum_frequency, anti_aliasing,
+        trim, remove_mean, decimate_kwargs, start_time, duration).
+
+        Parameters
+        ==========
+        sampling_frequency: float
+            New sampling frequency (Hz); must divide the current one.
+        """
+        self.strain_data.downsample(sampling_frequency, **kwargs)
+
+    @property
+    def autocovariance_function(self):
+        """ The noise autocovariance function
+        (:code:`bilby.gw.detector.AutoCovarianceFunction`) used by
+        time-domain likelihoods, or None. """
+        return getattr(self, "_autocovariance_function", None)
+
+    @autocovariance_function.setter
+    def autocovariance_function(self, autocovariance_function):
+        from .acf import AutoCovarianceFunction
+        if autocovariance_function is not None and not isinstance(
+                autocovariance_function, AutoCovarianceFunction):
+            raise TypeError("autocovariance_function must be a bilby.gw.detector.AutoCovarianceFunction")
+        self._autocovariance_function = autocovariance_function
+        if autocovariance_function is None:
+            self.meta_data.pop("autocovariance_function", None)
+        else:
+            self.meta_data["autocovariance_function"] = autocovariance_function.meta_data
+
+    def set_autocovariance_function_from_power_spectral_density(
+            self, analysis_duration, minimum_frequency=None, maximum_frequency=None,
+            sampling_frequency=None, duration_factor=16, fill_value=None,
+            fill_multiplier=1e4, fill_reference="max_in_band"):
+        """ Set the autocovariance function from this interferometer's
+        power spectral density curve.
+
+        The curve is evaluated on the grid 0, df, ..., f_s / 2 with
+        df = 1 / (duration_factor x analysis_duration), hard-patched outside
+        [minimum_frequency, maximum_frequency] and transformed to an ACF.
+        See :code:`AutoCovarianceFunction.from_power_spectral_density`.
+
+        Parameters
+        ==========
+        analysis_duration: float
+            Longest analysis segment (s) the ACF will be used for.
+        minimum_frequency, maximum_frequency: float, optional
+            Band; default the interferometer's minimum_frequency and
+            maximum_frequency (the latter must be below the Nyquist frequency).
+        sampling_frequency: float, optional
+            Default: the sampling frequency of the strain data if set, else 2048 Hz.
+        duration_factor: float
+            ACF period / analysis_duration (default 16).
+        fill_value, fill_multiplier, fill_reference:
+            Patch level, see :code:`AutoCovarianceFunction.from_power_spectral_density_array`.
+        """
+        from .acf import AutoCovarianceFunction
+        if sampling_frequency is None:
+            sampling_frequency = self.strain_data.sampling_frequency or 2048
+        if minimum_frequency is None:
+            minimum_frequency = self.minimum_frequency
+        if maximum_frequency is None:
+            maximum_frequency = self.maximum_frequency
+            if maximum_frequency >= sampling_frequency / 2:
+                raise ValueError(
+                    f"{self.name}: maximum_frequency ({maximum_frequency:g} Hz) must be below the "
+                    f"Nyquist frequency ({sampling_frequency / 2:g} Hz) to patch the PSD; set "
+                    "interferometer.maximum_frequency or pass maximum_frequency")
+        self.autocovariance_function = AutoCovarianceFunction.from_power_spectral_density(
+            self.power_spectral_density, minimum_frequency=minimum_frequency,
+            maximum_frequency=maximum_frequency, analysis_duration=analysis_duration,
+            sampling_frequency=sampling_frequency, duration_factor=duration_factor,
+            fill_value=fill_value, fill_multiplier=fill_multiplier, fill_reference=fill_reference,
+            source=f"{self.name} power_spectral_density")
+
     def antenna_response(self, ra, dec, time, psi, mode):
         """
         Calculate the antenna response function for a given sky location
@@ -365,6 +475,228 @@ class Interferometer(object):
         )
 
         return signal_ifo
+
+    def get_time_domain_detector_response(
+            self, waveform_polarizations, parameters, start_index=0,
+            number_of_samples=None, placement="nearest"):
+        """ Get the time-domain detector response for a particular waveform,
+        on a segment of this interferometer's data samples.
+
+        The polarizations are projected with the antenna patterns and placed
+        so that the model's t=0 arrives at geocent_time + (time delay from the
+        geocenter). Samples outside the segment are dropped; nothing wraps.
+
+        Parameters
+        ==========
+        waveform_polarizations: dict
+            Output of a time-domain source model (e.g.
+            :code:`bilby.gw.source.lal_binary_black_hole_time_domain`):
+            polarizations on their own grid and 'epoch'.
+        parameters: dict
+            Parameters describing position and time of arrival of the signal.
+        start_index: int
+            First data sample of the segment (default 0).
+        number_of_samples: int, optional
+            Length of the segment (default: to the end of the data).
+        placement: str
+            "nearest" (default), "subsample" or "fd_shift"; see
+            :code:`bilby.gw.time_domain_utils.place_time_domain_signal`.
+            With "subsample", geocent_time refers to the peak of
+            h_+^2 + h_x^2 instead of the model's t=0.
+
+        Returns
+        =======
+        array_like: The detector signal on the segment's samples.
+
+        Notes
+        =====
+        If the :code:`reference_time` attribute is not :code:`None`, this is
+        used to set the time at which the antenna response is evaluated,
+        otherwise the provided :code:`parameters["geocent_time"]` is used.
+        """
+        if number_of_samples is None:
+            number_of_samples = len(self.time_array) - start_index
+        sampling_frequency = self.strain_data.sampling_frequency
+        polarizations = {mode: value for mode, value in waveform_polarizations.items()
+                         if mode != "epoch"}
+        merger_index = -waveform_polarizations["epoch"] * sampling_frequency
+        if placement == "subsample":
+            polarizations, merger_index = align_peak_to_sample(polarizations)
+
+        if self.reference_time is None:
+            antenna_time = parameters["geocent_time"]
+        else:
+            antenna_time = self.reference_time
+
+        signal_ifo = 0
+        for mode, polarization in polarizations.items():
+            det_response = self.antenna_response(
+                parameters['ra'], parameters['dec'], antenna_time, parameters['psi'], mode)
+            signal_ifo = signal_ifo + polarization * det_response
+
+        time_shift = self.time_delay_from_geocenter(
+            parameters['ra'], parameters['dec'], parameters['geocent_time'])
+        # Be careful to first subtract the two GPS times which are ~1e9 sec.
+        # And then add the time_shift which varies at ~1e-5 sec
+        dt_geocent = parameters['geocent_time'] - self.strain_data.start_time
+        arrival_index = (dt_geocent + time_shift) * sampling_frequency
+
+        return place_time_domain_signal(
+            signal_ifo, merger_index=merger_index, arrival_index=arrival_index,
+            start_index=start_index, number_of_samples=number_of_samples, placement=placement)
+
+    def _full_segment_gohberg_semencul_vectors(self):
+        if self.autocovariance_function is None:
+            raise ValueError(f"{self.name}: no autocovariance_function set")
+        return self.autocovariance_function.gohberg_semencul_vectors(len(self.time_array))
+
+    def time_domain_inner_product(self, signal):
+        """ Noise-weighted inner product d^T C^-1 h over the full data segment,
+        with C built from the interferometer's autocovariance function.
+
+        Parameters
+        ==========
+        signal: array_like
+            Time-domain signal on the data samples.
+
+        Returns
+        =======
+        float
+        """
+        x, y = self._full_segment_gohberg_semencul_vectors()
+        return time_domain_noise_weighted_inner_product(self.time_domain_strain, signal, x, y)
+
+    def time_domain_optimal_snr_squared(self, signal):
+        """ Optimal SNR squared h^T C^-1 h over the full data segment.
+
+        Parameters
+        ==========
+        signal: array_like
+            Time-domain signal on the data samples.
+
+        Returns
+        =======
+        float
+        """
+        x, y = self._full_segment_gohberg_semencul_vectors()
+        return time_domain_optimal_snr_squared(signal, x, y)
+
+    def time_domain_matched_filter_snr(self, signal):
+        """ Matched-filter SNR d^T C^-1 h / sqrt(h^T C^-1 h) over the full
+        data segment.
+
+        Parameters
+        ==========
+        signal: array_like
+            Time-domain signal on the data samples.
+
+        Returns
+        =======
+        float
+        """
+        x, y = self._full_segment_gohberg_semencul_vectors()
+        return time_domain_matched_filter_snr(signal, self.time_domain_strain, x, y)
+
+    def inject_signal_time_domain(self, parameters, injection_polarizations=None,
+                                  waveform_generator=None, raise_error=True, placement="nearest"):
+        """ Inject a time-domain signal into the time-domain strain data.
+
+        The detector signal is built with
+        :code:`get_time_domain_detector_response` (the same placement the
+        time-domain likelihood uses) and added to the stored time series: no
+        Fourier transform, frequency mask or window is applied to the data.
+        Provide the injection parameters and either the injection polarizations
+        or the waveform generator; defaults to the injection polarizations if
+        both are given.
+
+        Parameters
+        ==========
+        parameters: dict
+            Parameters of the injection.
+        injection_polarizations: dict, optional
+            Output of :code:`waveform_generator.time_domain_strain()` for a
+            time-domain source model.
+        waveform_generator: bilby.gw.waveform_generator.WaveformGenerator, optional
+            A WaveformGenerator with a time-domain source model, e.g.
+            :code:`bilby.gw.source.lal_binary_black_hole_time_domain`.
+        raise_error: bool
+            If true, raise an error if the injected signal has a duration
+            longer than the data duration. If False, a warning will be printed
+            instead.
+        placement: str
+            "nearest" (default), "subsample" or "fd_shift".
+
+        Returns
+        =======
+        injection_polarizations: dict
+        """
+        self.check_signal_duration(parameters, raise_error)
+
+        if injection_polarizations is None and waveform_generator is None:
+            raise ValueError(
+                "inject_signal_time_domain needs one of waveform_generator or "
+                "injection_polarizations.")
+        elif injection_polarizations is not None:
+            self.inject_signal_time_domain_from_waveform_polarizations(
+                parameters=parameters, injection_polarizations=injection_polarizations,
+                placement=placement)
+        elif waveform_generator is not None:
+            injection_polarizations = self.inject_signal_time_domain_from_waveform_generator(
+                parameters=parameters, waveform_generator=waveform_generator, placement=placement)
+        return injection_polarizations
+
+    def inject_signal_time_domain_from_waveform_generator(self, parameters, waveform_generator,
+                                                          placement="nearest"):
+        """ Inject a time-domain signal using a waveform generator and a set of
+        parameters. See :code:`inject_signal_time_domain`.
+
+        Returns
+        =======
+        injection_polarizations: dict
+        """
+        if waveform_generator.time_domain_source_model is None:
+            raise ValueError("inject_signal_time_domain needs a waveform generator with a "
+                             "time_domain_source_model")
+        injection_polarizations = waveform_generator.time_domain_strain(parameters)
+        self.inject_signal_time_domain_from_waveform_polarizations(
+            parameters=parameters, injection_polarizations=injection_polarizations,
+            placement=placement)
+        return injection_polarizations
+
+    def inject_signal_time_domain_from_waveform_polarizations(self, parameters, injection_polarizations,
+                                                              placement="nearest"):
+        """ Inject a time-domain signal from a dict of waveform polarizations
+        (output of a time-domain source model). See
+        :code:`inject_signal_time_domain`.
+        """
+        if not self.strain_data.time_within_data(parameters['geocent_time']):
+            logger.warning(
+                'Injecting signal outside segment, start_time={}, merger time={}.'
+                .format(self.strain_data.start_time, parameters['geocent_time']))
+        if "epoch" not in injection_polarizations:
+            raise ValueError("injection_polarizations must come from a time-domain source model "
+                             "(with an 'epoch' entry)")
+
+        signal_ifo = self.get_time_domain_detector_response(
+            injection_polarizations, parameters, placement=placement)
+        time_domain_strain = np.array(self.strain_data.time_domain_strain, dtype=float) + signal_ifo
+        self.strain_data._time_domain_strain = time_domain_strain
+        self.strain_data._frequency_domain_strain = None
+
+        self.meta_data['parameters'] = parameters
+        self.meta_data['injection_domain'] = "time"
+        self.meta_data['injection_placement'] = placement
+        logger.info("Injected time-domain signal in {}:".format(self.name))
+        if self.autocovariance_function is not None:
+            self.meta_data['optimal_SNR'] = self.time_domain_optimal_snr_squared(signal_ifo) ** 0.5
+            self.meta_data['matched_filter_SNR'] = self.time_domain_matched_filter_snr(signal_ifo)
+            logger.info("  optimal SNR = {:.2f}".format(self.meta_data['optimal_SNR']))
+            logger.info("  matched filter SNR = {:.2f}".format(self.meta_data['matched_filter_SNR']))
+        else:
+            logger.info("  no autocovariance_function set: SNRs not computed (set it before "
+                        "injecting to record them)")
+        for key in parameters:
+            logger.info('  {} = {}'.format(key, parameters[key]))
 
     def check_signal_duration(self, parameters, raise_error=True):
         """ Check that the signal with the given parameters fits in the data
@@ -759,6 +1091,10 @@ class Interferometer(object):
         Saves two files: the frequency domain strain data with three columns [f, real part of h(f),
         imaginary part of h(f)], and the amplitude spectral density with two columns [f, ASD(f)].
 
+        If an autocovariance function is set, two more files are written: the
+        time-domain strain [t, h(t)] (*_time_domain_data.dat) and the
+        autocovariance function [lag, ACF] (*_acf.dat).
+
         Note that in v1.3.0 and below, the ASD was saved in a file called *_psd.dat.
 
         Parameters
@@ -786,6 +1122,12 @@ class Interferometer(object):
                        [self.strain_data.frequency_array,
                         self.amplitude_spectral_density_array]).T,
                    header='f h(f)')
+        if self.autocovariance_function is not None:
+            stem = '{}/{}'.format(outdir, self.name) if label is None else '{}/{}_{}'.format(outdir, self.name, label)
+            np.savetxt('{}_time_domain_data.dat'.format(stem),
+                       np.array([self.strain_data.time_array, self.strain_data.time_domain_strain]).T,
+                       header='t h(t)')
+            self.autocovariance_function.save('{}_acf.dat'.format(stem))
 
     def plot_data(self, signal=None, outdir='.', label=None):
         import matplotlib.pyplot as plt

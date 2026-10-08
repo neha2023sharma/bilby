@@ -661,6 +661,193 @@ class InterferometerStrainData(object):
         else:
             raise ValueError("Data frequencies do not match frequency_array")
 
+    def set_from_power_spectral_density_time_domain(
+            self, power_spectral_density, sampling_frequency, duration,
+            start_time=0, *, random_state=None):
+        """ Set the `time_domain_strain` to a noise realisation, with no
+        frequency mask and no window.
+
+        The noise is generated as in :code:`set_from_power_spectral_density`
+        (Gaussian, coloured by the full PSD curve; zero outside the curve's
+        frequency range) and transformed to the time domain without applying
+        the [minimum_frequency, maximum_frequency] mask. Use this for
+        time-domain analyses; :code:`set_from_power_spectral_density` stores
+        frequency-domain data whose time series is band-limited.
+
+        Note: the noise contains the full curve between its lowest frequency
+        and the Nyquist frequency, while a time-domain likelihood whose ACF is
+        patched outside [minimum_frequency, maximum_frequency] assumes the
+        patch level there.
+
+        Parameters
+        ==========
+        power_spectral_density: bilby.gw.detector.PowerSpectralDensity
+            A PowerSpectralDensity object used to generate the data
+        sampling_frequency: float
+            The sampling frequency (in Hz)
+        duration: float
+            The data duration (in s)
+        start_time: float
+            The GPS start-time of the data
+        """
+        self._times_and_frequencies = CoupledTimeAndFrequencySeries(duration=duration,
+                                                                    sampling_frequency=sampling_frequency,
+                                                                    start_time=start_time)
+        logger.debug('Setting time-domain data using noise realization from provided '
+                     'power_spectral_density')
+        frequency_domain_strain, frequency_array = \
+            power_spectral_density.get_noise_realisation(
+                self.frequency_array.shape[0], self.duration, random_state=random_state)
+        if not (self.duration == duration and frequency_array.shape == self.frequency_array.shape):
+            raise ValueError("Data frequencies do not match frequency_array")
+        time_domain_strain = utils.infft(frequency_domain_strain, self.sampling_frequency)
+        if np.shape(time_domain_strain) != np.shape(self.time_array):
+            raise ValueError("Data times do not match time array")
+        self._time_domain_strain = time_domain_strain
+        self._frequency_domain_strain = None
+
+    def downsample(
+            self, sampling_frequency, preserve_time=None, minimum_frequency=None,
+            maximum_frequency=None, anti_aliasing="fft", trim=0.25, remove_mean=True,
+            decimate_kwargs=None, start_time=None, duration=None):
+        """ Downsample the time-domain strain (the :code:`ringdown` package's
+        :code:`Data.condition`).
+
+        Supply a stretch of data LONGER than the segment you want to analyse,
+        then crop (with :code:`start_time` and :code:`duration`, or afterwards).
+        Any filtering affects samples near the ends of the series, and with the
+        default :code:`trim=0.25` only the middle half of the input is kept.
+
+        Steps
+        =====
+        1. If :code:`preserve_time` is given, move the series by fewer than
+           factor samples so that the sample nearest that time survives the
+           decimation (cyclic roll if trim > 0, as in ringdown, whose wrapped
+           samples are then trimmed; otherwise the first samples are dropped).
+        2. Optional Butterworth filter (order 4, applied forwards and backwards):
+           high-pass if only minimum_frequency is given, low-pass if only
+           maximum_frequency, band-pass if both. Off by default.
+        3. Anti-aliasing and decimation by the integer factor
+           (current / new sampling frequency):
+
+           - "fft" (default; ringdown's digital_filter=True): multiply by a Tukey
+             window with alpha=trim, FFT, set all frequencies above the new
+             Nyquist frequency to zero, inverse FFT, keep every factor-th sample.
+           - "decimate" (ringdown's digital_filter=False):
+             :code:`scipy.signal.decimate(..., zero_phase=True, **decimate_kwargs)`.
+
+        4. Remove the fraction :code:`trim` of samples from each end (this
+           removes the tapered part of the window).
+        5. Subtract the mean if :code:`remove_mean`.
+        6. Crop to [start_time, start_time + duration) if given.
+
+        Parameters
+        ==========
+        sampling_frequency: float
+            New sampling frequency; must divide the current one.
+        preserve_time: float, optional
+            GPS time whose nearest sample must be kept.
+        minimum_frequency, maximum_frequency: float, optional
+            Butterworth filter corners (Hz). None (default) for no filter.
+        anti_aliasing: str
+            "fft" (default) or "decimate".
+        trim: float
+            Fraction removed from each end after downsampling (default 0.25).
+        remove_mean: bool
+            Subtract the mean of the result (default True).
+        decimate_kwargs: dict, optional
+            Passed to scipy.signal.decimate when anti_aliasing="decimate".
+        start_time, duration: float, optional
+            Crop the result to this segment; a ValueError is raised if it does
+            not lie inside the downsampled, trimmed data.
+        """
+        from scipy import signal
+        from scipy.signal.windows import tukey
+
+        strain = np.array(self.time_domain_strain, dtype=float)
+        times = np.array(self.time_array, dtype=float)
+        original_sampling_frequency = float(self.sampling_frequency)
+        ratio = original_sampling_frequency / sampling_frequency
+        factor = int(round(ratio))
+        if factor < 1 or not np.isclose(ratio, factor, rtol=0, atol=1e-9):
+            raise ValueError(
+                f"Sampling frequency {sampling_frequency:g} Hz does not divide the current "
+                f"{original_sampling_frequency:g} Hz")
+        logger.info(
+            f"Downsampling {times[0]:.6f} - {times[-1] + 1 / original_sampling_frequency:.6f} "
+            f"from {original_sampling_frequency:g} to {sampling_frequency:g} Hz "
+            f"(anti_aliasing={anti_aliasing}, trim={trim}); supply data longer than the "
+            "analysis segment")
+
+        if preserve_time is not None:
+            if not times[0] <= preserve_time <= times[-1]:
+                raise ValueError(f"preserve_time {preserve_time} not in the data "
+                                 f"[{times[0]}, {times[-1]}]")
+            shift = int(np.argmin(abs(times - preserve_time))) % factor
+            if trim > 0:
+                times = np.roll(times, -shift)
+                strain = np.roll(strain, -shift)
+            else:
+                times = times[shift:]
+                strain = strain[shift:]
+
+        nyquist_frequency = 0.5 * original_sampling_frequency
+        if minimum_frequency or maximum_frequency:
+            if minimum_frequency and not maximum_frequency:
+                b, a = signal.butter(4, minimum_frequency / nyquist_frequency, btype='highpass')
+            elif maximum_frequency and not minimum_frequency:
+                b, a = signal.butter(4, maximum_frequency / nyquist_frequency, btype='lowpass')
+            else:
+                b, a = signal.butter(4, (minimum_frequency / nyquist_frequency,
+                                         maximum_frequency / nyquist_frequency), btype='bandpass')
+            logger.info(f"Butterworth filter (order 4, zero phase): minimum_frequency="
+                        f"{minimum_frequency}, maximum_frequency={maximum_frequency}")
+            strain = signal.filtfilt(b, a, strain)
+
+        if factor > 1:
+            if anti_aliasing == "fft":
+                window = tukey(len(strain), trim)
+                strain_fd = np.fft.rfft(strain * window)
+                frequencies = np.fft.rfftfreq(len(strain), 1 / original_sampling_frequency)
+                strain_fd[frequencies > nyquist_frequency / factor] = 0
+                strain = np.fft.irfft(strain_fd, n=len(strain))[::factor]
+            elif anti_aliasing == "decimate":
+                strain = signal.decimate(strain, factor, zero_phase=True, **(decimate_kwargs or {}))
+            else:
+                raise ValueError("anti_aliasing must be 'fft' or 'decimate'")
+            times = times[::factor]
+
+        number_of_samples = len(strain)
+        first = int(round(trim * number_of_samples))
+        last = int(round((1 - trim) * number_of_samples))
+        strain, times = strain[first:last], times[first:last]
+        if trim > 0:
+            logger.info(f"Trimmed {first / sampling_frequency:g} s from each end")
+        if remove_mean:
+            strain = strain - np.mean(strain)
+
+        if start_time is not None or duration is not None:
+            if start_time is None or duration is None:
+                raise ValueError("Give both start_time and duration to crop")
+            first = int(round((start_time - times[0]) * sampling_frequency))
+            number_of_samples = int(round(duration * sampling_frequency))
+            if first < 0 or first + number_of_samples > len(strain):
+                raise ValueError(
+                    f"Requested segment [{start_time}, {start_time + duration}) is not inside the "
+                    f"downsampled data [{times[0]}, {times[-1] + 1 / sampling_frequency}); "
+                    "supply a longer stretch of data")
+            if abs(times[first] - start_time) > 1e-6 / sampling_frequency:
+                logger.info(f"Segment starts at the nearest sample, {times[first]:.6f} "
+                            f"(requested {start_time:.6f})")
+            strain = strain[first:first + number_of_samples]
+            times = times[first:first + number_of_samples]
+
+        self.set_from_time_domain_strain(
+            strain, sampling_frequency=sampling_frequency,
+            duration=len(strain) / sampling_frequency, start_time=times[0])
+        logger.info(f"Downsampled data: {times[0]:.6f} - {times[-1] + 1 / sampling_frequency:.6f} "
+                    f"at {sampling_frequency:g} Hz")
+
     def set_from_zero_noise(self, sampling_frequency, duration, start_time=0):
         """ Set the `frequency_domain_strain` to zero noise
 

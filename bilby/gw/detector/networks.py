@@ -195,6 +195,128 @@ class InterferometerList(list):
 
         return all_injection_polarizations
 
+    def set_strain_data_from_power_spectral_densities_time_domain(
+        self, sampling_frequency, duration, start_time=0, *, random_state=None
+    ):
+        """Set the time-domain strain data of each detector to a noise
+        realization of its power spectral density, with no frequency mask and
+        no window (for time-domain analyses).
+
+        See :py:meth:`bilby.gw.detector.InterferometerStrainData.set_from_power_spectral_density_time_domain`.
+
+        Parameters
+        ==========
+        sampling_frequency: float
+            The sampling frequency (in Hz)
+        duration: float
+            The data duration (in s)
+        start_time: float
+            The GPS start-time of the data
+        random_state: numpy.random.Generator, int, optional
+            Random number generator or seed.
+        """
+        for interferometer in self:
+            interferometer.set_strain_data_from_power_spectral_density_time_domain(
+                sampling_frequency=sampling_frequency,
+                duration=duration,
+                start_time=start_time,
+                random_state=random_state,
+            )
+
+    def set_autocovariance_functions_from_power_spectral_densities(
+        self, analysis_duration, **kwargs
+    ):
+        """Set the autocovariance function of each detector from its power
+        spectral density curve.
+
+        See :py:meth:`bilby.gw.detector.Interferometer.set_autocovariance_function_from_power_spectral_density`
+        for the keyword arguments.
+
+        Parameters
+        ==========
+        analysis_duration: float
+            Duration (in s) of the longest segment that will be analysed.
+        """
+        for interferometer in self:
+            interferometer.set_autocovariance_function_from_power_spectral_density(
+                analysis_duration=analysis_duration, **kwargs
+            )
+
+    def downsample_strain_data(self, sampling_frequency, **kwargs):
+        """Downsample the time-domain strain data of each detector.
+
+        See :py:meth:`bilby.gw.detector.InterferometerStrainData.downsample`
+        for the keyword arguments.
+
+        Parameters
+        ==========
+        sampling_frequency: float
+            The new sampling frequency (in Hz)
+        """
+        for interferometer in self:
+            interferometer.downsample_strain_data(sampling_frequency, **kwargs)
+
+    def inject_signal_time_domain(
+        self,
+        parameters=None,
+        injection_polarizations=None,
+        waveform_generator=None,
+        raise_error=True,
+        placement="nearest",
+    ):
+        """ Inject a time-domain signal into the time-domain strain data of each
+        detector (no Fourier transform, frequency mask or window).
+
+        Parameters
+        ==========
+        parameters: dict
+            Parameters of the injection.
+        injection_polarizations: dict
+           Output of `waveform_generator.time_domain_strain()` for a time-domain
+           source model. If `waveform_generator` is also given, this is used.
+        waveform_generator: bilby.gw.waveform_generator.WaveformGenerator
+            A WaveformGenerator with a time-domain source model. The waveform is
+            generated once and projected onto every detector.
+        raise_error: bool
+            Whether to raise an error if the injected signal does not fit in
+            the segment.
+        placement: str
+            "nearest" (default), "subsample" or "fd_shift"; see
+            :code:`bilby.gw.time_domain_utils.place_time_domain_signal`.
+
+        Returns
+        =======
+        injection_polarizations: list
+            One dict per detector (the same polarizations for each).
+        """
+        if injection_polarizations is None:
+            if waveform_generator is not None:
+                if waveform_generator.time_domain_source_model is None:
+                    raise ValueError(
+                        "inject_signal_time_domain needs a waveform generator with "
+                        "a time_domain_source_model")
+                injection_polarizations = waveform_generator.time_domain_strain(
+                    parameters
+                )
+            else:
+                raise ValueError(
+                    "inject_signal_time_domain needs one of waveform_generator or "
+                    "injection_polarizations."
+                )
+
+        all_injection_polarizations = list()
+        for interferometer in self:
+            all_injection_polarizations.append(
+                interferometer.inject_signal_time_domain(
+                    parameters=parameters,
+                    injection_polarizations=injection_polarizations,
+                    raise_error=raise_error,
+                    placement=placement,
+                )
+            )
+
+        return all_injection_polarizations
+
     def save_data(self, outdir, label=None):
         """Creates a save file for the data in plain text format
 

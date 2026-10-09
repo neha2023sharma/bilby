@@ -44,11 +44,13 @@ def interferometers(noise="zero", acf=True, analysis_segment="imr", duration=DUR
     ifos.set_analysis_windows(
         duration=duration, start_time=START_TIME, analysis_segment=analysis_segment,
         segment_cut_time=segment_cut_time, cut_reference_parameters=INJECTION)
-    if noise == "zero":
-        ifos.set_strain_data_from_zero_noise_time_domain(SAMPLING_FREQUENCY)
-    else:
-        ifos.set_strain_data_from_power_spectral_densities_time_domain(
-            SAMPLING_FREQUENCY, random_state=3)
+    random_state = np.random.default_rng(3)
+    for ifo in ifos:
+        window = (SAMPLING_FREQUENCY, ifo.analysis_window["duration"], ifo.analysis_window["start_time"])
+        if noise == "zero":
+            ifo.set_strain_data_from_zero_noise(*window)
+        else:
+            ifo.set_strain_data_from_power_spectral_density(*window, random_state=random_state)
     if acf:
         ifos.set_autocovariance_functions_from_power_spectral_densities()
     return ifos
@@ -294,17 +296,20 @@ class TestTimeDomainData(unittest.TestCase):
     def test_analysis_data_is_the_window_slice(self):
         full = interferometers()
         full.inject_signal_time_domain(parameters=INJECTION, waveform_generator=waveform_generator())
-        snr_full = full[0].meta_data["optimal_SNR"]
         post_inspiral = interferometers(**SEGMENTS["post_inspiral"])
         post_inspiral.inject_signal_time_domain(parameters=INJECTION, waveform_generator=waveform_generator())
         for ifo, reference in zip(full, post_inspiral):
             ifo.analysis_window = (reference.analysis_window["start_time"], reference.analysis_window["duration"])
-            reference.autocovariance_function = ifo.autocovariance_function
             self.assertEqual(len(ifo.time_domain_strain), DURATION * SAMPLING_FREQUENCY)
-            np.testing.assert_allclose(ifo.analysis_time_array, reference.analysis_time_array, atol=1e-6)
+            np.testing.assert_allclose(
+                ifo.time_array[ifo._analysis_slice()], reference.time_array[reference._analysis_slice()],
+                atol=1e-6)
             np.testing.assert_allclose(ifo.analysis_data, reference.analysis_data, atol=1e-30)
-            self.assertAlmostEqual(ifo.meta_data["optimal_SNR"], reference.meta_data["optimal_SNR"], 8)
-        self.assertLess(full[0].meta_data["optimal_SNR"], snr_full)
+
+    def test_injection_needs_autocovariance_function(self):
+        ifos = interferometers(acf=False)
+        with self.assertRaises(ValueError):
+            ifos.inject_signal_time_domain(parameters=INJECTION, waveform_generator=waveform_generator())
 
     def _sine_data(self, start_time, duration, sampling_frequency=4096):
         ifo = bilby.gw.detector.get_empty_interferometer("H1")
@@ -319,18 +324,30 @@ class TestTimeDomainData(unittest.TestCase):
         ifo.analysis_window = (1006.0, 4)
         ifo.condition_strain_data(1024)
         self.assertEqual(ifo.sampling_frequency, 1024)
-        self.assertAlmostEqual(ifo.analysis_time_array[0], 1006.0)
+        self.assertAlmostEqual(ifo.time_array[ifo._analysis_slice()][0], 1006.0)
         self.assertEqual(len(ifo.analysis_data), 4096)
         # the 60 Hz line is kept and the 1500 Hz line (above the new Nyquist frequency) removed
         expected = np.sin(2 * np.pi * 60 * ifo.time_array)
         np.testing.assert_allclose(ifo.time_domain_strain, expected - np.mean(expected), atol=1e-6)
+
+    def test_decimate(self):
+        ifo = self._sine_data(1000.0001, 16)
+        ifo.analysis_window = (1006.0, 4)
+        ifo.condition_strain_data(1024, taper_and_trim=False, remove_mean=False)
+        self.assertEqual(ifo.sampling_frequency, 1024)
+        self.assertEqual(ifo.duration, 16)
+        self.assertAlmostEqual(ifo.time_array[ifo._analysis_slice()][0], 1006.0, 3)
+        self.assertEqual(len(ifo.analysis_data), 4096)
+        # the 60 Hz line is kept (up to the filter ripple) and the 1500 Hz line removed
+        expected = np.sin(2 * np.pi * 60 * ifo.time_array[ifo._analysis_slice()])
+        np.testing.assert_allclose(ifo.analysis_data, expected, atol=1e-2)
 
     def test_downsample_data_slightly_off_grid(self):
         ifo = self._sine_data(1004.0001, 8)
         ifo.analysis_window = (1006.0, 4)
         ifo.condition_strain_data(1024)
         self.assertEqual(len(ifo.analysis_data), 4096)
-        self.assertAlmostEqual(ifo.analysis_time_array[0], 1006.0, 3)
+        self.assertAlmostEqual(ifo.time_array[ifo._analysis_slice()][0], 1006.0, 3)
 
     def test_downsample_needs_buffer(self):
         ifo = self._sine_data(1005.0, 6)
@@ -342,18 +359,17 @@ class TestTimeDomainData(unittest.TestCase):
         ifo = self._sine_data(1000.0, 16)
         ifo.analysis_window = (1006.0, 4)
         self.assertEqual(len(ifo.time_domain_strain), 16 * 4096)
-        self.assertAlmostEqual(ifo.analysis_time_array[0], 1006.0)
+        self.assertAlmostEqual(ifo.time_array[ifo._analysis_slice()][0], 1006.0)
         self.assertEqual(len(ifo.analysis_data), 4 * 4096)
 
     def test_network_downsample(self):
         ifos = bilby.gw.detector.InterferometerList(["H1", "L1"])
-        ifos.set_analysis_windows(duration=16, start_time=1000)
-        ifos.set_strain_data_from_power_spectral_densities_time_domain(4096, random_state=2)
+        ifos.set_strain_data_from_power_spectral_densities(4096, 16, 1000, random_state=2)
         ifos.set_analysis_windows(duration=4, start_time=1006)
         ifos.condition_strain_data(2048)
         for ifo in ifos:
             self.assertEqual(ifo.sampling_frequency, 2048)
-            self.assertAlmostEqual(ifo.analysis_time_array[0], 1006.0)
+            self.assertAlmostEqual(ifo.time_array[ifo._analysis_slice()][0], 1006.0)
             self.assertEqual(len(ifo.analysis_data), 4 * 2048)
 
 
@@ -452,8 +468,7 @@ class TestNoiseInputs(unittest.TestCase):
     def test_welch_acf_agrees_with_psd_acf(self):
         ifo = bilby.gw.detector.get_empty_interferometer("H1")
         ifo.minimum_frequency, ifo.maximum_frequency = 20, 448
-        ifo.strain_data.set_from_power_spectral_density_time_domain(
-            ifo.power_spectral_density, SAMPLING_FREQUENCY, 256, 0, random_state=11)
+        ifo.set_strain_data_from_power_spectral_density(SAMPLING_FREQUENCY, 256, 0, random_state=11)
         noise = ifo.time_domain_strain.copy()
         ifo.analysis_window = (0, 1)
         ifo.set_autocovariance_function_from_power_spectral_density()

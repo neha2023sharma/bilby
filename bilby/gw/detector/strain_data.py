@@ -661,42 +661,6 @@ class InterferometerStrainData(object):
         else:
             raise ValueError("Data frequencies do not match frequency_array")
 
-    def set_from_power_spectral_density_time_domain(
-            self, power_spectral_density, sampling_frequency, duration,
-            start_time=0, *, random_state=None):
-        """ Set the time-domain strain data to a Gaussian noise realisation of
-        the power spectral density, with no frequency mask and no window
-        function.
-
-        Parameters
-        ==========
-        power_spectral_density: bilby.gw.detector.PowerSpectralDensity
-            A PowerSpectralDensity object used to generate the data
-        sampling_frequency: float
-            The sampling frequency (in Hz)
-        duration: float
-            The data duration (in s)
-        start_time: float
-            The GPS start-time of the data
-        random_state: numpy.random.Generator, int, optional
-            Random number generator or seed.
-        """
-        self._times_and_frequencies = CoupledTimeAndFrequencySeries(duration=duration,
-                                                                    sampling_frequency=sampling_frequency,
-                                                                    start_time=start_time)
-        logger.debug('Setting time-domain data using noise realization from provided '
-                     'power_spectral_density')
-        frequency_domain_strain, frequency_array = \
-            power_spectral_density.get_noise_realisation(
-                self.frequency_array.shape[0], self.duration, random_state=random_state)
-        if not (self.duration == duration and frequency_array.shape == self.frequency_array.shape):
-            raise ValueError("Data frequencies do not match frequency_array")
-        time_domain_strain = utils.infft(frequency_domain_strain, self.sampling_frequency)
-        if np.shape(time_domain_strain) != np.shape(self.time_array):
-            raise ValueError("Data times do not match time array")
-        self._time_domain_strain = time_domain_strain
-        self._frequency_domain_strain = None
-
     def set_from_zero_noise(self, sampling_frequency, duration, start_time=0):
         """ Set the `frequency_domain_strain` to zero noise
 

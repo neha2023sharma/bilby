@@ -254,36 +254,6 @@ class InterferometerList(list):
                 analysis_segment=analysis_segment, segment_cut_time=segment_cut_time,
                 cut_time=cut_time)
 
-    def set_strain_data_from_power_spectral_densities_time_domain(
-        self, sampling_frequency, *, random_state=None
-    ):
-        """Set the strain data of each detector in its analysis window to a
-        time-domain noise realisation of its power spectral density.
-
-        See :py:meth:`bilby.gw.detector.Interferometer.set_strain_data_from_power_spectral_density_time_domain`.
-
-        Parameters
-        ==========
-        sampling_frequency: float
-            The sampling frequency (Hz).
-        random_state: numpy.random.Generator, int, optional
-            Random number generator or seed.
-        """
-        for interferometer in self:
-            interferometer.set_strain_data_from_power_spectral_density_time_domain(
-                sampling_frequency=sampling_frequency, random_state=random_state)
-
-    def set_strain_data_from_zero_noise_time_domain(self, sampling_frequency):
-        """Set the strain data of each detector in its analysis window to zero.
-
-        Parameters
-        ==========
-        sampling_frequency: float
-            The sampling frequency (Hz).
-        """
-        for interferometer in self:
-            interferometer.set_strain_data_from_zero_noise_time_domain(sampling_frequency)
-
     def set_autocovariance_functions_from_power_spectral_densities(self, **kwargs):
         """Set the autocovariance function of each detector from its power
         spectral density.
@@ -294,7 +264,8 @@ class InterferometerList(list):
         for interferometer in self:
             interferometer.set_autocovariance_function_from_power_spectral_density(**kwargs)
 
-    def condition_strain_data(self, sampling_frequency, trim=0.25, remove_mean=True):
+    def condition_strain_data(self, sampling_frequency, trim=0.25, taper_and_trim=True,
+                              remove_mean=True):
         """Downsample the time-domain strain data of each detector around its
         analysis window.
 
@@ -306,12 +277,16 @@ class InterferometerList(list):
             The new sampling frequency (Hz).
         trim: float
             Fraction of the data at each end that is removed (default 0.25).
+        taper_and_trim: bool
+            Use the Tukey window, buffer and trimming (default True); if
+            False, use :code:`scipy.signal.decimate`.
         remove_mean: bool
             Subtract the mean of the result (default True).
         """
         for interferometer in self:
             interferometer.condition_strain_data(
-                sampling_frequency, trim=trim, remove_mean=remove_mean)
+                sampling_frequency, trim=trim, taper_and_trim=taper_and_trim,
+                remove_mean=remove_mean)
 
     def inject_signal_time_domain(
         self,

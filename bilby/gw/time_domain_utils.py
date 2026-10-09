@@ -10,8 +10,6 @@ import numpy as np
 from scipy.fft import next_fast_len
 from scipy.linalg import solve_toeplitz
 
-PLACEMENT_METHODS = ("nearest", "fd_shift")
-
 
 def gohberg_semencul_vectors(acf):
     """ Gohberg-Semencul generators of the inverse of the Toeplitz matrix
@@ -158,4 +156,4 @@ def place_time_domain_signal(signal, merger_index, arrival_index, number_of_samp
         shifted = fractional_time_shift(signal, fraction, pad=pad)
         return _copy_into_segment(shifted, offset - pad, number_of_samples)
     else:
-        raise ValueError(f"placement must be one of {PLACEMENT_METHODS}, not {placement!r}")
+        raise ValueError(f"placement must be 'nearest' or 'fd_shift', not {placement!r}")

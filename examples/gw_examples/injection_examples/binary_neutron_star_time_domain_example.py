@@ -99,9 +99,11 @@ for interferometer in interferometers:
 # with segment_cut_time and cut_reference_parameters.
 interferometers.set_analysis_windows(duration=duration, start_time=start_time)
 
-# Time-domain noise drawn from the PSD curves (no mask, no window function).
-interferometers.set_strain_data_from_power_spectral_densities_time_domain(
-    sampling_frequency=sampling_frequency
+# Gaussian noise drawn from the PSD curves, covering the analysis window. The
+# noise outside [minimum_frequency, maximum_frequency] is removed by bilby's
+# frequency mask; the likelihood gives almost no weight to it anyway.
+interferometers.set_strain_data_from_power_spectral_densities(
+    sampling_frequency=sampling_frequency, duration=duration, start_time=start_time
 )
 
 # Autocovariance function of each detector from its PSD curve. Its duration

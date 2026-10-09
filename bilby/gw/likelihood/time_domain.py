@@ -2,7 +2,7 @@ import copy
 
 import numpy as np
 
-from ..time_domain_utils import PLACEMENT_METHODS, gohberg_semencul_product
+from ..time_domain_utils import gohberg_semencul_product
 from .base import GravitationalWaveTransient
 
 
@@ -91,9 +91,8 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
             raise ValueError(
                 f"{self.__class__.__name__} needs a waveform generator with a "
                 "time_domain_source_model, e.g. bilby.gw.source.lal_binary_black_hole_time_domain")
-        if placement not in PLACEMENT_METHODS:
-            raise ValueError(
-                f"placement must be one of {PLACEMENT_METHODS}, not {placement!r}")
+        if placement not in ("nearest", "fd_shift"):
+            raise ValueError(f"placement must be 'nearest' or 'fd_shift', not {placement!r}")
 
         super(TimeDomainGravitationalWaveTransient, self).__init__(
             interferometers=interferometers,

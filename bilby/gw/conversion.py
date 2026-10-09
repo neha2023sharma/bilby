@@ -2228,9 +2228,8 @@ def generate_source_frame_parameters(sample):
 
 
 def _signal_polarizations_for_likelihood(likelihood, parameters):
-    """Waveform polarizations in the domain the likelihood works in: the
-    time-domain source model output for a time-domain likelihood, the
-    frequency-domain strain otherwise."""
+    """Return the time-domain waveform for the time-domain likelihood, and
+    the frequency-domain waveform for all other likelihoods."""
     if getattr(likelihood, "likelihood_domain", "frequency") == "time":
         return likelihood.waveform_generator.time_domain_strain(parameters)
     return likelihood.waveform_generator.frequency_domain_strain(parameters)

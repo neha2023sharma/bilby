@@ -94,16 +94,19 @@ for interferometer in interferometers:
     interferometer.minimum_frequency = 40
     interferometer.maximum_frequency = 896
 
-# Time-domain noise drawn from the design PSD curves (no mask, no window).
+# The analysis window: here the whole data segment ("imr"). For an inspiral or
+# post-inspiral analysis, use analysis_segment="inspiral" / "post_inspiral"
+# with segment_cut_time and cut_reference_parameters.
+interferometers.set_analysis_windows(duration=duration, start_time=start_time)
+
+# Time-domain noise drawn from the PSD curves (no mask, no window function).
 interferometers.set_strain_data_from_power_spectral_densities_time_domain(
-    sampling_frequency=sampling_frequency, duration=duration, start_time=start_time
+    sampling_frequency=sampling_frequency
 )
 
-# Autocovariance function of each detector from its PSD curve. Its period is
-# duration_factor (default 16) x analysis_duration.
-interferometers.set_autocovariance_functions_from_power_spectral_densities(
-    analysis_duration=duration
-)
+# Autocovariance function of each detector from its PSD curve. Its duration
+# is duration_factor (default 16) times the analysis window.
+interferometers.set_autocovariance_functions_from_power_spectral_densities()
 
 # Add the signal to the time series.
 interferometers.inject_signal_time_domain(
@@ -148,8 +151,7 @@ priors["lambda_2"] = bilby.core.prior.Constraint(
 
 
 # Initialise the time-domain likelihood by passing in the interferometer data
-# (IFOs) and the waveform generator. All the data are analysed
-# (analysis_segment="imr").
+# (IFOs) and the waveform generator.
 likelihood = bilby.gw.likelihood.TimeDomainGravitationalWaveTransient(
     interferometers=interferometers,
     waveform_generator=waveform_generator,

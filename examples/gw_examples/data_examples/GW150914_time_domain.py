@@ -4,9 +4,8 @@ Tutorial to demonstrate running time-domain parameter estimation on GW150914
 
 This is the GW150914.py analysis done in the time domain:
 
-- the strain is downloaded as a time series, longer than the analysis segment,
-  stored with no window, then downsampled to 2048 Hz (anti-aliasing as in the
-  ringdown package) and cropped to the 4 s analysis segment;
+- the strain is downloaded as a time series covering the 4 s analysis window
+  and 2 s on each side, downsampled to 2048 Hz and cropped to the window;
 - the noise model of each detector is an autocovariance function (ACF)
   computed from a PSD read with its frequency array from an HDF5 file;
 - the likelihood is bilby.gw.likelihood.TimeDomainGravitationalWaveTransient,
@@ -42,10 +41,10 @@ post_trigger_duration = 2  # Time between trigger time and end of segment
 end_time = trigger_time + post_trigger_duration
 start_time = end_time - duration
 
-# Data downloaded on each side of the analysis segment. With the default
-# trim=0.25 the downsampling keeps the middle half of the downloaded data, so
-# this must be larger than duration / 2.
-padding = 8
+# Data downloaded on each side of the analysis window. The downsampling
+# removes duration / 2 of data on each side of the window (trim=0.25), so this
+# must be at least duration / 2.
+padding = duration / 2
 
 # File with the PSDs and their frequency arrays (psds/h1_psd/frequency,
 # psds/h1_psd/spectrum, ...). GWTC PESummary release files are also read, with
@@ -58,11 +57,10 @@ ifo_list = bilby.gw.detector.InterferometerList([])
 for det in detectors:
     logger.info("Downloading analysis data for ifo {}".format(det))
     ifo = bilby.gw.detector.get_empty_interferometer(det)
+    ifo.set_analysis_window(start_time=start_time, duration=duration)
     data = TimeSeries.fetch_open_data(det, start_time - padding, end_time + padding)
     ifo.strain_data.set_from_gwpy_timeseries(data)
-    ifo.downsample_strain_data(
-        sampling_frequency, start_time=start_time, duration=duration
-    )
+    ifo.downsample_strain_data(sampling_frequency)
 
     frequency_array, psd_array = psds[det]
     ifo.power_spectral_density = bilby.gw.detector.PowerSpectralDensity(
@@ -71,9 +69,9 @@ for det in detectors:
     ifo.maximum_frequency = maximum_frequency
     ifo.minimum_frequency = minimum_frequency
 
-    # The PSD is not interpolated: the ACF has period 1 / (frequency spacing)
-    # (8 s here, twice the analysis segment). Outside [minimum_frequency,
-    # maximum_frequency] the PSD is set to a large value.
+    # The ACF lasts 1 / (frequency spacing of the PSD), 8 s here, twice the
+    # analysis segment. Outside [minimum_frequency, maximum_frequency] the PSD
+    # is set to fill_value (default 1e4) times its maximum inside the band.
     ifo.autocovariance_function = (
         bilby.gw.detector.AutoCovarianceFunction.from_power_spectral_density_array(
             frequency_array,
@@ -81,7 +79,6 @@ for det in detectors:
             minimum_frequency=minimum_frequency,
             maximum_frequency=maximum_frequency,
             sampling_frequency=sampling_frequency,
-            source=f"{psd_file} {det}",
         )
     )
     ifo_list.append(ifo)
@@ -120,9 +117,6 @@ waveform_generator = bilby.gw.WaveformGenerator(
 
 # In this step, we define the likelihood. Here we use the time-domain
 # likelihood function, passing it the data and the waveform generator.
-# All of the 4 s segment is analysed (analysis_segment="imr"); use
-# analysis_segment="inspiral" or "post_inspiral" with segment_cut_time and
-# cut_reference_parameters to analyse the data before / after a cut.
 likelihood = bilby.gw.likelihood.TimeDomainGravitationalWaveTransient(
     ifo_list,
     waveform_generator,

@@ -2,11 +2,8 @@ import copy
 
 import numpy as np
 
-from ...core.utils import logger
 from ..time_domain_utils import PLACEMENT_METHODS, GohbergSemenculInverse
 from .base import GravitationalWaveTransient
-
-ANALYSIS_SEGMENTS = ("imr", "inspiral", "post_inspiral")
 
 
 class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
@@ -14,47 +11,32 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
 
     The noise in each interferometer is a stationary Gaussian process with
     covariance matrix :math:`C_{ij} = \\rho(|i - j|)`, where :math:`\\rho` is
-    the autocovariance function (ACF) stored on the interferometer
-    (:code:`interferometer.autocovariance_function`). For data :math:`d` and a
-    template :math:`h` on the analysed samples of each interferometer
+    the autocovariance function (ACF) of the interferometer. For the strain
+    data :math:`d` and a template :math:`h` in the analysis window of each
+    interferometer
 
     .. math::
 
         \\ln \\mathcal{L} = \\sum_{\\rm ifo} \\left[ d^T C^{-1} h
-        - \\frac{1}{2} h^T C^{-1} h - \\frac{1}{2} d^T C^{-1} d \\right]
+        - \\frac{1}{2} h^T C^{-1} h - \\frac{1}{2} d^T C^{-1} d \\right].
 
-    :code:`log_likelihood_ratio` returns the first two terms, and
-    :code:`noise_log_likelihood` the last. :math:`C^{-1}` is applied with its
-    Gohberg-Semencul representation (computed once per interferometer), and
-    :math:`d^T C^{-1}` and :math:`d^T C^{-1} d` are computed once.
+    :code:`log_likelihood_ratio` returns the first two terms and
+    :code:`noise_log_likelihood` the last. :math:`C^{-1}` is applied with the
+    Gohberg-Semencul vectors stored on each interferometer.
 
-    The waveform generator must have a time-domain source model that returns
-    the polarizations on its own sample grid together with an 'epoch' (the
-    time of the first sample relative to the model's merger), e.g.
-    :code:`bilby.gw.source.lal_binary_black_hole_time_domain`. The template is
-    projected onto each interferometer and placed so that the model's merger
-    arrives at :code:`geocent_time` plus the time delay from the geocenter.
-    Template samples outside the analysed samples are dropped; nothing wraps
-    around.
-
-    The analysed samples of each interferometer are either all of its data
-    ("imr"), or the samples before / after a cut time ("inspiral" /
-    "post_inspiral"). The cut time is fixed once from
-    :code:`cut_reference_parameters`:
-    :math:`t_{\\rm cut} = t_c^{\\rm ref} + \\Delta t_{\\rm ifo}(\\alpha^{\\rm ref},
-    \\delta^{\\rm ref}) + \\tau_{\\rm cut}`. The "post_inspiral" segment starts at
-    the first sample after :math:`t_{\\rm cut}` and the "inspiral" segment ends
-    just before it, so the two are complementary.
+    The template is projected onto each interferometer and placed so that the
+    model's t=0 arrives at geocent_time plus the time delay from the
+    geocenter. Template samples outside the analysis window are dropped.
 
     Parameters
     ==========
     interferometers: list, bilby.gw.detector.InterferometerList
-        A list of :code:`bilby.gw.detector.Interferometer` instances, with
-        time-domain strain data and an autocovariance function set (e.g. with
-        :code:`set_autocovariance_function_from_power_spectral_density` or by
-        assigning a :code:`bilby.gw.detector.AutoCovarianceFunction`).
+        A list of :code:`bilby.gw.detector.Interferometer` instances, each with
+        an analysis window, time-domain strain data in that window and an
+        autocovariance function.
     waveform_generator: bilby.gw.waveform_generator.WaveformGenerator
-        A WaveformGenerator with a time-domain source model.
+        A WaveformGenerator with a time-domain source model, e.g.
+        :code:`bilby.gw.source.lal_binary_black_hole_time_domain`.
     distance_marginalization: bool, optional
         If true, marginalize over distance in the likelihood. This uses a
         look up table calculated at run time. The distance prior is set to be a
@@ -74,26 +56,11 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
     time_reference: str, optional
         Name of the reference for the sampled time parameter, as in
         :code:`GravitationalWaveTransient`.
-    analysis_segment: str, optional
-        "imr" (default; all the data), "inspiral" or "post_inspiral".
-    segment_cut_time: float, optional
-        :math:`\\tau_{\\rm cut}` in seconds, the cut time relative to the
-        arrival of the reference merger at each interferometer. Required for
-        "inspiral" and "post_inspiral".
-    cut_reference_parameters: dict, optional
-        Dictionary with 'ra', 'dec' and 'geocent_time' (or the parameters of
-        :code:`reference_frame` / :code:`time_reference`) fixing the cut time.
-        Required for "inspiral" and "post_inspiral".
-    segment_duration: float, optional
-        Length (s) of the "inspiral" / "post_inspiral" segment, ending / starting
-        at the cut. Default: up to the start / end of the data.
     placement: str, optional
-        How the template is placed on the data samples, see
-        :code:`bilby.gw.time_domain_utils.place_time_domain_signal`:
-        "nearest" (default), "subsample" or "fd_shift". With "subsample",
-        :code:`geocent_time` is the time of the peak of
-        :math:`h_+^2 + h_\\times^2` rather than the model's merger time (t=0).
-        Use the same placement for injection and analysis.
+        How the template is placed on the data samples: "nearest" (default),
+        "subsample" or "fd_shift"; see
+        :code:`bilby.gw.time_domain_utils.place_time_domain_signal`. Use the
+        same placement for injection and analysis.
     time_marginalization, phase_marginalization, calibration_marginalization: bool
         Not implemented for this likelihood; must be False.
 
@@ -109,10 +76,8 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
     def __init__(
             self, interferometers, waveform_generator, distance_marginalization=False,
             priors=None, distance_marginalization_lookup_table=None, reference_frame="sky",
-            time_reference="geocenter", analysis_segment="imr", segment_cut_time=None,
-            cut_reference_parameters=None, segment_duration=None, placement="nearest",
-            time_marginalization=False, phase_marginalization=False,
-            calibration_marginalization=False,
+            time_reference="geocenter", placement="nearest", time_marginalization=False,
+            phase_marginalization=False, calibration_marginalization=False,
     ):
         for name, value in dict(
                 time_marginalization=time_marginalization,
@@ -125,9 +90,6 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
             raise ValueError(
                 f"{self.__class__.__name__} needs a waveform generator with a "
                 "time_domain_source_model, e.g. bilby.gw.source.lal_binary_black_hole_time_domain")
-        if analysis_segment not in ANALYSIS_SEGMENTS:
-            raise ValueError(
-                f"analysis_segment must be one of {ANALYSIS_SEGMENTS}, not {analysis_segment!r}")
         if placement not in PLACEMENT_METHODS:
             raise ValueError(
                 f"placement must be one of {PLACEMENT_METHODS}, not {placement!r}")
@@ -145,132 +107,48 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
             reference_frame=reference_frame,
             time_reference=time_reference,
         )
-        self.analysis_segment = analysis_segment
-        self.segment_cut_time = segment_cut_time
-        self.cut_reference_parameters = cut_reference_parameters
-        self.segment_duration = segment_duration
         self.placement = placement
-
-        self._check_interferometers()
-        self._setup_analysis_windows()
         self._setup_noise_model()
 
     def __repr__(self):
         return self.__class__.__name__ + (
             '(interferometers={},\n\twaveform_generator={},\n\tdistance_marginalization={}, '
-            'priors={}, analysis_segment={}, segment_cut_time={}, segment_duration={}, '
-            'placement={})'.format(
+            'priors={}, placement={})'.format(
                 self.interferometers, self.waveform_generator, self.distance_marginalization,
-                self.priors, self.analysis_segment, self.segment_cut_time,
-                self.segment_duration, self.placement))
-
-    # ------------------------------------------------------------------
-    # Set up (done once)
-    # ------------------------------------------------------------------
-    def _check_interferometers(self):
-        for interferometer in self.interferometers:
-            if interferometer.autocovariance_function is None:
-                raise ValueError(
-                    f"{interferometer.name}: no autocovariance_function set; use e.g. "
-                    "interferometer.set_autocovariance_function_from_power_spectral_density")
-            acf_sampling_frequency = interferometer.autocovariance_function.sampling_frequency
-            if not np.isclose(acf_sampling_frequency, interferometer.sampling_frequency,
-                              rtol=1e-9, atol=0):
-                raise ValueError(
-                    f"{interferometer.name}: autocovariance function sampling frequency "
-                    f"{acf_sampling_frequency:g} Hz differs from the data's "
-                    f"{interferometer.sampling_frequency:g} Hz")
-
-    def _setup_analysis_windows(self):
-        """ Indices of the analysed samples of each interferometer. """
-        if self.analysis_segment == "imr":
-            if self.segment_duration is not None:
-                logger.warning("segment_duration is ignored for analysis_segment='imr' "
-                               "(all the data are analysed)")
-            if self.segment_cut_time is not None:
-                logger.warning("segment_cut_time is ignored for analysis_segment='imr'")
-            reference = None
-        else:
-            if self.segment_cut_time is None or self.cut_reference_parameters is None:
-                raise ValueError(
-                    f"analysis_segment={self.analysis_segment!r} needs segment_cut_time and "
-                    "cut_reference_parameters")
-            reference = self.get_sky_frame_parameters(dict(self.cut_reference_parameters))
-
-        self.analysis_windows = dict()
-        for interferometer in self.interferometers:
-            number_of_data_samples = len(interferometer.time_array)
-            sampling_frequency = interferometer.sampling_frequency
-            start_time = interferometer.strain_data.start_time
-            if reference is None:
-                start_index, end_index, cut_time = 0, number_of_data_samples, None
-            else:
-                delay = interferometer.time_delay_from_geocenter(
-                    reference["ra"], reference["dec"], reference["geocent_time"])
-                # subtract the two GPS times first
-                cut_offset = (reference["geocent_time"] - start_time) + delay + self.segment_cut_time
-                cut_time = start_time + cut_offset
-                # first sample strictly after the cut: inspiral and post_inspiral are complementary
-                cut_index = int(np.floor(cut_offset * sampling_frequency)) + 1
-                length = (None if self.segment_duration is None
-                          else int(round(self.segment_duration * sampling_frequency)))
-                if self.analysis_segment == "inspiral":
-                    end_index = cut_index
-                    start_index = 0 if length is None else cut_index - length
-                else:
-                    start_index = cut_index
-                    end_index = number_of_data_samples if length is None else cut_index + length
-                if start_index < 0 or end_index > number_of_data_samples or end_index - start_index < 2:
-                    raise ValueError(
-                        f"{interferometer.name}: {self.analysis_segment} segment "
-                        f"[{start_index}:{end_index}] is outside the data [0:{number_of_data_samples}] "
-                        f"(cut time {cut_time:.6f})")
-            self.analysis_windows[interferometer.name] = dict(
-                start_index=int(start_index),
-                end_index=int(end_index),
-                number_of_samples=int(end_index - start_index),
-                start_time=float(start_time + start_index / sampling_frequency),
-                end_time=float(start_time + (end_index - 1) / sampling_frequency),
-                cut_time=None if cut_time is None else float(cut_time),
-            )
-            window = self.analysis_windows[interferometer.name]
-            logger.info(
-                f"{interferometer.name} [{self.analysis_segment}]: samples "
-                f"[{window['start_index']}:{window['end_index']}] (N = {window['number_of_samples']}), "
-                f"GPS {window['start_time']:.6f} - {window['end_time']:.6f}"
-                + ("" if cut_time is None else f", cut at {cut_time:.6f}"))
+                self.priors, self.placement))
 
     def _setup_noise_model(self):
-        """ Gohberg-Semencul vectors, d^T C^-1 and d^T C^-1 d for each interferometer. """
+        """ Inverse covariance operator, d^T C^-1 and d^T C^-1 d for each
+        interferometer. """
         self._inverse_covariance = dict()
         self._data_times_inverse_covariance = dict()
         self._data_inverse_covariance_data = dict()
         for interferometer in self.interferometers:
-            window = self.analysis_windows[interferometer.name]
             acf = interferometer.autocovariance_function
-            inverse_covariance = GohbergSemenculInverse(
-                *acf.gohberg_semencul_vectors(window["number_of_samples"]))
-            data = self._analysed_data(interferometer)
+            if acf is None:
+                raise ValueError(f"{interferometer.name}: no autocovariance_function set")
+            if not np.isclose(acf.sampling_frequency, interferometer.sampling_frequency,
+                              rtol=1e-9, atol=0):
+                raise ValueError(
+                    f"{interferometer.name}: autocovariance function sampling frequency "
+                    f"{acf.sampling_frequency:g} Hz differs from the data's "
+                    f"{interferometer.sampling_frequency:g} Hz")
+            data = np.asarray(interferometer.time_domain_strain, dtype=float)
+            x, y = interferometer.gohberg_semencul_vectors
+            if len(x) != len(data):
+                raise ValueError(
+                    f"{interferometer.name}: the data have {len(data)} samples but the analysis "
+                    f"window has {len(x)}; crop the data to the analysis window")
+            inverse_covariance = GohbergSemenculInverse(x, y)
             data_times_inverse_covariance = inverse_covariance(data)
             self._inverse_covariance[interferometer.name] = inverse_covariance
             self._data_times_inverse_covariance[interferometer.name] = data_times_inverse_covariance
             self._data_inverse_covariance_data[interferometer.name] = float(
                 np.dot(data_times_inverse_covariance, data))
-            logger.info(
-                f"{interferometer.name}: ACF period {acf.duration:g} s = "
-                f"{acf.number_of_samples / window['number_of_samples']:.1f} x analysed segment")
 
-    def _analysed_data(self, interferometer):
-        window = self.analysis_windows[interferometer.name]
-        return np.asarray(interferometer.time_domain_strain, dtype=float)[
-            window["start_index"]:window["end_index"]]
-
-    # ------------------------------------------------------------------
-    # Likelihood
-    # ------------------------------------------------------------------
     def _compute_full_waveform(self, signal_polarizations, interferometer, parameters):
         """ Project the time-domain polarizations onto the interferometer and
-        place them on its analysed samples.
+        place them on the samples of its analysis window.
 
         Parameters
         ==========
@@ -281,16 +159,14 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
 
         Returns
         =======
-        array_like: The template on the analysed samples.
+        array_like: The template on the data samples.
         """
-        window = self.analysis_windows[interferometer.name]
         return interferometer.get_time_domain_detector_response(
-            signal_polarizations, parameters, start_index=window["start_index"],
-            number_of_samples=window["number_of_samples"], placement=self.placement)
+            signal_polarizations, parameters, placement=self.placement)
 
     def calculate_snrs(self, waveform_polarizations, interferometer, *, return_array=True, parameters):
         """ Compute :math:`d^T C^{-1} h`, :math:`h^T C^{-1} h` and the matched
-        filter SNR on the analysed samples of one interferometer.
+        filter SNR in the analysis window of one interferometer.
 
         Parameters
         ----------
@@ -411,15 +287,5 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
     @property
     def meta_data(self):
         meta_data = super(TimeDomainGravitationalWaveTransient, self).meta_data
-        meta_data.update(
-            likelihood_domain=self.likelihood_domain,
-            analysis_segment=self.analysis_segment,
-            segment_cut_time=self.segment_cut_time,
-            cut_reference_parameters=(
-                None if self.cut_reference_parameters is None
-                else dict(self.cut_reference_parameters)),
-            segment_duration=self.segment_duration,
-            placement=self.placement,
-            analysis_windows=copy.deepcopy(self.analysis_windows),
-        )
+        meta_data.update(likelihood_domain=self.likelihood_domain, placement=self.placement)
         return meta_data

@@ -235,64 +235,59 @@ def align_peak_to_sample(waveform_polarizations, pad=32):
     return aligned, int(round(peak)) + pad
 
 
-def _copy_into_segment(signal, offset, start_index, number_of_samples):
+def _copy_into_segment(signal, offset, number_of_samples):
     """ Put signal sample k at data index offset + k and return data indices
-    [start_index, start_index + number_of_samples); zero elsewhere. """
+    [0, number_of_samples); zero elsewhere. """
     segment = np.zeros(number_of_samples)
-    first = max(0, start_index - offset)
-    last = min(len(signal), start_index + number_of_samples - offset)
+    first = max(0, -offset)
+    last = min(len(signal), number_of_samples - offset)
     if last > first:
-        segment[offset + first - start_index:offset + last - start_index] = signal[first:last]
+        segment[offset + first:offset + last] = signal[first:last]
     return segment
 
 
-def place_time_domain_signal(signal, merger_index, arrival_index, start_index,
-                             number_of_samples, placement="nearest"):
+def place_time_domain_signal(signal, merger_index, arrival_index, number_of_samples,
+                             placement="nearest"):
     """ Place a time-domain signal, generated on its own grid with the data's
-    sample spacing, into a segment of data.
+    sample spacing, on the data samples.
 
-    Waveform sample k has time (k - merger_index) * dt relative to the
-    model's merger (its t=0). In data-index units the merger arrives at
-    :code:`arrival_index` (fractional). Samples falling outside the segment are
-    dropped; segment samples the signal does not reach are zero. Nothing wraps.
+    Waveform sample k has time (k - merger_index) / f_s relative to the
+    model's t=0, which arrives at data index `arrival_index`. Waveform samples
+    outside the data are dropped and data samples the waveform does not reach
+    are zero.
 
     Parameters
     ==========
     signal: array_like
-        Projected (detector) signal on its own grid.
+        Detector signal on its own grid.
     merger_index: float
-        Index of the model's t=0 in :code:`signal` (-epoch * sampling_frequency).
+        Index of the model's t=0 in `signal`.
     arrival_index: float
-        Arrival time of t=0 at the detector, in samples from the first data sample.
-    start_index: int
-        First data index of the analysis segment.
+        Index in the data at which the model's t=0 arrives.
     number_of_samples: int
-        Length of the analysis segment.
+        Number of data samples.
     placement: str
-        - "nearest": t=0 of the signal is put on the data sample nearest to the
-          arrival time; both indices are rounded separately, as in
-          LALInference and the :code:`ringdown` package (default).
-        - "subsample": as "nearest", with :code:`merger_index` the integer peak
-          index from :code:`align_peak_to_sample`. The arrival time then refers
-          to the peak of :math:`h_+^2 + h_\\times^2`, not to the model's t=0
-          (the :code:`ringdown` package's :code:`manual_epoch` convention).
-        - "fd_shift": exact delay; whole samples by index, the remaining
-          fraction with a Fourier phase shift on a zero-padded copy, applied
-          before cropping to the segment.
+        - "nearest" (default): `merger_index` and `arrival_index` are each
+          rounded to the nearest sample.
+        - "subsample": as "nearest", with `merger_index` the peak index
+          returned by :code:`align_peak_to_sample`, so that `arrival_index`
+          refers to the peak of :math:`h_+^2 + h_\\times^2`.
+        - "fd_shift": whole samples are shifted by index and the remaining
+          fraction with a Fourier phase shift of a zero-padded copy.
 
     Returns
     =======
-    array_like: The signal on the segment's samples.
+    array_like: The signal on the data samples.
     """
     if placement in ("nearest", "subsample"):
         offset = round(arrival_index) - round(merger_index)
-        return _copy_into_segment(signal, offset, start_index, number_of_samples)
+        return _copy_into_segment(signal, offset, number_of_samples)
     elif placement == "fd_shift":
         position = arrival_index - merger_index
         offset = int(np.floor(position + 0.5))
         fraction = position - offset
         pad = 32
         shifted = fractional_time_shift(signal, fraction, pad=pad)
-        return _copy_into_segment(shifted, offset - pad, start_index, number_of_samples)
+        return _copy_into_segment(shifted, offset - pad, number_of_samples)
     else:
         raise ValueError(f"placement must be one of {PLACEMENT_METHODS}, not {placement!r}")

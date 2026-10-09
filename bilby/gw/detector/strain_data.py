@@ -664,20 +664,9 @@ class InterferometerStrainData(object):
     def set_from_power_spectral_density_time_domain(
             self, power_spectral_density, sampling_frequency, duration,
             start_time=0, *, random_state=None):
-        """ Set the `time_domain_strain` to a noise realisation, with no
-        frequency mask and no window.
-
-        The noise is generated as in :code:`set_from_power_spectral_density`
-        (Gaussian, coloured by the full PSD curve; zero outside the curve's
-        frequency range) and transformed to the time domain without applying
-        the [minimum_frequency, maximum_frequency] mask. Use this for
-        time-domain analyses; :code:`set_from_power_spectral_density` stores
-        frequency-domain data whose time series is band-limited.
-
-        Note: the noise contains the full curve between its lowest frequency
-        and the Nyquist frequency, while a time-domain likelihood whose ACF is
-        patched outside [minimum_frequency, maximum_frequency] assumes the
-        patch level there.
+        """ Set the time-domain strain data to a Gaussian noise realisation of
+        the power spectral density, with no frequency mask and no window
+        function.
 
         Parameters
         ==========
@@ -689,6 +678,8 @@ class InterferometerStrainData(object):
             The data duration (in s)
         start_time: float
             The GPS start-time of the data
+        random_state: numpy.random.Generator, int, optional
+            Random number generator or seed.
         """
         self._times_and_frequencies = CoupledTimeAndFrequencySeries(duration=duration,
                                                                     sampling_frequency=sampling_frequency,
@@ -710,56 +701,47 @@ class InterferometerStrainData(object):
             self, sampling_frequency, preserve_time=None, minimum_frequency=None,
             maximum_frequency=None, anti_aliasing="fft", trim=0.25, remove_mean=True,
             decimate_kwargs=None, start_time=None, duration=None):
-        """ Downsample the time-domain strain (the :code:`ringdown` package's
-        :code:`Data.condition`).
+        """ Condition and downsample the time-domain strain data.
 
-        Supply a stretch of data LONGER than the segment you want to analyse,
-        then crop (with :code:`start_time` and :code:`duration`, or afterwards).
-        Any filtering affects samples near the ends of the series, and with the
-        default :code:`trim=0.25` only the middle half of the input is kept.
+        Steps:
 
-        Steps
-        =====
-        1. If :code:`preserve_time` is given, move the series by fewer than
-           factor samples so that the sample nearest that time survives the
-           decimation (cyclic roll if trim > 0, as in ringdown, whose wrapped
-           samples are then trimmed; otherwise the first samples are dropped).
-        2. Optional Butterworth filter (order 4, applied forwards and backwards):
-           high-pass if only minimum_frequency is given, low-pass if only
-           maximum_frequency, band-pass if both. Off by default.
-        3. Anti-aliasing and decimation by the integer factor
-           (current / new sampling frequency):
-
-           - "fft" (default; ringdown's digital_filter=True): multiply by a Tukey
-             window with alpha=trim, FFT, set all frequencies above the new
-             Nyquist frequency to zero, inverse FFT, keep every factor-th sample.
-           - "decimate" (ringdown's digital_filter=False):
-             :code:`scipy.signal.decimate(..., zero_phase=True, **decimate_kwargs)`.
-
-        4. Remove the fraction :code:`trim` of samples from each end (this
-           removes the tapered part of the window).
-        5. Subtract the mean if :code:`remove_mean`.
-        6. Crop to [start_time, start_time + duration) if given.
+        1. If `preserve_time` is given, shift the series by fewer than
+           `factor` samples (factor = current / new sampling frequency) so
+           that the sample nearest `preserve_time` is kept.
+        2. If `minimum_frequency` and/or `maximum_frequency` are given, apply
+           an order-4 Butterworth high-, low- or band-pass filter forwards
+           and backwards.
+        3. Anti-aliasing and decimation: with `anti_aliasing="fft"`, multiply
+           by a Tukey window with alpha = `trim`, set all frequencies above the
+           new Nyquist frequency to zero and keep every factor-th sample; with
+           `anti_aliasing="decimate"`, use :code:`scipy.signal.decimate`.
+        4. Keep [`start_time`, `start_time` + `duration`) if given (it must lie
+           inside the data without a fraction `trim` at each end), otherwise
+           remove a fraction `trim` of the samples at each end.
+        5. Subtract the mean if `remove_mean`.
 
         Parameters
         ==========
         sampling_frequency: float
-            New sampling frequency; must divide the current one.
+            New sampling frequency (Hz); must divide the current one.
         preserve_time: float, optional
-            GPS time whose nearest sample must be kept.
-        minimum_frequency, maximum_frequency: float, optional
-            Butterworth filter corners (Hz). None (default) for no filter.
+            GPS time whose nearest sample is kept.
+        minimum_frequency: float, optional
+            High-pass corner frequency of the Butterworth filter (Hz).
+        maximum_frequency: float, optional
+            Low-pass corner frequency of the Butterworth filter (Hz).
         anti_aliasing: str
             "fft" (default) or "decimate".
         trim: float
-            Fraction removed from each end after downsampling (default 0.25).
+            Fraction of the data at each end that is removed (default 0.25).
         remove_mean: bool
             Subtract the mean of the result (default True).
         decimate_kwargs: dict, optional
-            Passed to scipy.signal.decimate when anti_aliasing="decimate".
-        start_time, duration: float, optional
-            Crop the result to this segment; a ValueError is raised if it does
-            not lie inside the downsampled, trimmed data.
+            Keyword arguments of :code:`scipy.signal.decimate`.
+        start_time: float, optional
+            GPS start time of the segment to keep (s).
+        duration: float, optional
+            Duration of the segment to keep (s).
         """
         from scipy import signal
         from scipy.signal.windows import tukey
@@ -773,11 +755,6 @@ class InterferometerStrainData(object):
             raise ValueError(
                 f"Sampling frequency {sampling_frequency:g} Hz does not divide the current "
                 f"{original_sampling_frequency:g} Hz")
-        logger.info(
-            f"Downsampling {times[0]:.6f} - {times[-1] + 1 / original_sampling_frequency:.6f} "
-            f"from {original_sampling_frequency:g} to {sampling_frequency:g} Hz "
-            f"(anti_aliasing={anti_aliasing}, trim={trim}); supply data longer than the "
-            "analysis segment")
 
         if preserve_time is not None:
             if not times[0] <= preserve_time <= times[-1]:
@@ -800,8 +777,6 @@ class InterferometerStrainData(object):
             else:
                 b, a = signal.butter(4, (minimum_frequency / nyquist_frequency,
                                          maximum_frequency / nyquist_frequency), btype='bandpass')
-            logger.info(f"Butterworth filter (order 4, zero phase): minimum_frequency="
-                        f"{minimum_frequency}, maximum_frequency={maximum_frequency}")
             strain = signal.filtfilt(b, a, strain)
 
         if factor > 1:
@@ -818,35 +793,28 @@ class InterferometerStrainData(object):
             times = times[::factor]
 
         number_of_samples = len(strain)
-        first = int(round(trim * number_of_samples))
-        last = int(round((1 - trim) * number_of_samples))
+        if start_time is None and duration is None:
+            first = int(round(trim * number_of_samples))
+            last = int(round((1 - trim) * number_of_samples))
+        elif start_time is None or duration is None:
+            raise ValueError("Give both start_time and duration")
+        else:
+            data_duration = number_of_samples / sampling_frequency
+            tolerance = 1 / sampling_frequency
+            if (start_time < times[0] + trim * data_duration - tolerance
+                    or start_time + duration > times[0] + (1 - trim) * data_duration + tolerance):
+                raise ValueError(
+                    f"The segment {start_time:.6f} - {start_time + duration:.6f} is not inside "
+                    f"the part of the data kept after trimming a fraction {trim} at each end")
+            first = int(round((start_time - times[0]) * sampling_frequency))
+            last = first + int(round(duration * sampling_frequency))
         strain, times = strain[first:last], times[first:last]
-        if trim > 0:
-            logger.info(f"Trimmed {first / sampling_frequency:g} s from each end")
         if remove_mean:
             strain = strain - np.mean(strain)
-
-        if start_time is not None or duration is not None:
-            if start_time is None or duration is None:
-                raise ValueError("Give both start_time and duration to crop")
-            first = int(round((start_time - times[0]) * sampling_frequency))
-            number_of_samples = int(round(duration * sampling_frequency))
-            if first < 0 or first + number_of_samples > len(strain):
-                raise ValueError(
-                    f"Requested segment [{start_time}, {start_time + duration}) is not inside the "
-                    f"downsampled data [{times[0]}, {times[-1] + 1 / sampling_frequency}); "
-                    "supply a longer stretch of data")
-            if abs(times[first] - start_time) > 1e-6 / sampling_frequency:
-                logger.info(f"Segment starts at the nearest sample, {times[first]:.6f} "
-                            f"(requested {start_time:.6f})")
-            strain = strain[first:first + number_of_samples]
-            times = times[first:first + number_of_samples]
 
         self.set_from_time_domain_strain(
             strain, sampling_frequency=sampling_frequency,
             duration=len(strain) / sampling_frequency, start_time=times[0])
-        logger.info(f"Downsampled data: {times[0]:.6f} - {times[-1] + 1 / sampling_frequency:.6f} "
-                    f"at {sampling_frequency:g} Hz")
 
     def set_from_zero_noise(self, sampling_frequency, duration, start_time=0):
         """ Set the `frequency_domain_strain` to zero noise

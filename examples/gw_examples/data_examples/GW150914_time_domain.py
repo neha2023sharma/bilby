@@ -61,7 +61,7 @@ for det in detectors:
     ifo.analysis_window = (start_time, duration)
     data = TimeSeries.fetch_open_data(det, start_time - padding, end_time + padding)
     ifo.strain_data.set_from_gwpy_timeseries(data)
-    ifo.downsample_strain_data(sampling_frequency)
+    ifo.condition_strain_data(sampling_frequency)
 
     frequency_array, psd_array = psds[det]
     ifo.power_spectral_density = bilby.gw.detector.PowerSpectralDensity(

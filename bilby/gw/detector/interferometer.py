@@ -14,11 +14,7 @@ from ..geometry import (
 from .calibration import Recalibrate
 from .geometry import InterferometerGeometry
 from .strain_data import InterferometerStrainData
-from ..time_domain_utils import (
-    GohbergSemenculInverse,
-    align_peak_to_sample,
-    place_time_domain_signal,
-)
+from ..time_domain_utils import gohberg_semencul_product, place_time_domain_signal
 from ..conversion import generate_all_bbh_parameters
 
 
@@ -102,7 +98,6 @@ class Interferometer(object):
         self._analysis_window = None
         self._injected_signal = None
         self.gohberg_semencul_vectors = None
-        self.inverse_covariance = None
 
     def __eq__(self, other):
         if self.name == other.name and \
@@ -337,37 +332,27 @@ class Interferometer(object):
             sampling_frequency=sampling_frequency, duration=duration, start_time=start_time)
         self._injected_signal = None
 
-    def downsample_strain_data(self, sampling_frequency, **kwargs):
-        """ Condition and downsample the time-domain strain data around the
-        analysis window.
+    def condition_strain_data(self, sampling_frequency, trim=0.25, remove_mean=True):
+        """ Downsample the time-domain strain data around the analysis window.
 
-        See :code:`bilby.gw.detector.condition_data.condition_strain_data`. If
-        the data are already at `sampling_frequency` and no filter is
-        requested, they are left unchanged.
+        See :code:`bilby.gw.detector.condition_data.condition_strain_data`.
+        Any injected signal is not conditioned, and its SNRs are removed from
+        :code:`meta_data`.
 
         Parameters
         ==========
         sampling_frequency: float
             New sampling frequency (Hz); must divide the current one.
-        kwargs:
-            Passed to :code:`condition_strain_data` (minimum_frequency,
-            maximum_frequency, anti_aliasing, trim, remove_mean,
-            decimate_kwargs).
+        trim: float
+            Fraction of the data at each end that is removed (default 0.25).
+        remove_mean: bool
+            Subtract the mean of the result (default True).
         """
         from .condition_data import condition_strain_data
         start_time, duration = self._require_analysis_window()
-        no_filter = kwargs.get("minimum_frequency") is None and kwargs.get("maximum_frequency") is None
-        if self.strain_data.sampling_frequency == sampling_frequency and no_filter:
-            return
-        if self._injected_signal is not None:
-            # condition the injected signal in the same way, for its SNRs
-            injected_signal = InterferometerStrainData()
-            injected_signal.set_from_time_domain_strain(
-                self._injected_signal, sampling_frequency=self.strain_data.sampling_frequency,
-                duration=self.strain_data.duration, start_time=self.strain_data.start_time)
-            condition_strain_data(injected_signal, sampling_frequency, start_time, duration, **kwargs)
-            self._injected_signal = injected_signal.time_domain_strain
-        condition_strain_data(self.strain_data, sampling_frequency, start_time, duration, **kwargs)
+        condition_strain_data(self.strain_data, sampling_frequency, start_time, duration,
+                              trim=trim, remove_mean=remove_mean)
+        self._injected_signal = None
         self._update_injection_snrs()
 
     def _analysis_slice(self):
@@ -412,7 +397,6 @@ class Interferometer(object):
             self._require_analysis_window()
         self._autocovariance_function = autocovariance_function
         self.gohberg_semencul_vectors = None
-        self.inverse_covariance = None
         if autocovariance_function is None:
             self.meta_data.pop("autocovariance_function", None)
         else:
@@ -422,14 +406,12 @@ class Interferometer(object):
 
     def _set_gohberg_semencul_vectors(self):
         """ Compute the Gohberg-Semencul vectors (x, y) of the inverse noise
-        covariance matrix for the analysis window, and the operator applying
-        it, and store them in :code:`gohberg_semencul_vectors` and
-        :code:`inverse_covariance`. """
+        covariance matrix for the analysis window and store them in
+        :code:`gohberg_semencul_vectors`. """
         number_of_samples = int(round(
             self.analysis_window["duration"] * self.autocovariance_function.sampling_frequency))
         self.gohberg_semencul_vectors = self.autocovariance_function.gohberg_semencul_vectors(
             number_of_samples)
-        self.inverse_covariance = GohbergSemenculInverse(*self.gohberg_semencul_vectors)
         self._update_injection_snrs()
 
     def set_autocovariance_function_from_power_spectral_density(
@@ -603,10 +585,8 @@ class Interferometer(object):
         parameters: dict
             Parameters describing position and time of arrival of the signal.
         placement: str
-            "nearest" (default), "subsample" or "fd_shift"; see
+            "nearest" (default) or "fd_shift"; see
             :code:`bilby.gw.time_domain_utils.place_time_domain_signal`.
-            With "subsample", geocent_time is the time of the peak of
-            h_+^2 + h_x^2 instead of the model's t=0.
 
         Returns
         =======
@@ -631,8 +611,6 @@ class Interferometer(object):
         polarizations = {mode: value for mode, value in waveform_polarizations.items()
                          if mode != "epoch"}
         merger_index = -waveform_polarizations["epoch"] * sampling_frequency
-        if placement == "subsample":
-            polarizations, merger_index = align_peak_to_sample(polarizations)
 
         if self.reference_time is None:
             antenna_time = parameters["geocent_time"]
@@ -661,7 +639,7 @@ class Interferometer(object):
         in the analysis window in :code:`meta_data`. """
         for key in ["optimal_SNR", "matched_filter_SNR"]:
             self.meta_data.pop(key, None)
-        if (self._injected_signal is None or self.inverse_covariance is None
+        if (self._injected_signal is None or self.gohberg_semencul_vectors is None
                 or len(self._injected_signal) != len(self.strain_data.time_domain_strain)):
             return
         try:
@@ -669,9 +647,10 @@ class Interferometer(object):
         except ValueError:
             return
         signal = self._injected_signal[analysis_slice]
-        if len(signal) != self.inverse_covariance.number_of_samples:
+        x, y = self.gohberg_semencul_vectors
+        if len(signal) != len(x):
             return
-        inverse_covariance_signal = self.inverse_covariance(signal)
+        inverse_covariance_signal = gohberg_semencul_product(x, y, signal)
         optimal_snr = float(np.dot(signal, inverse_covariance_signal)) ** 0.5
         self.meta_data['optimal_SNR'] = optimal_snr
         self.meta_data['matched_filter_SNR'] = float(
@@ -703,7 +682,7 @@ class Interferometer(object):
             A WaveformGenerator with a time-domain source model, e.g.
             :code:`bilby.gw.source.lal_binary_black_hole_time_domain`.
         placement: str
-            "nearest" (default), "subsample" or "fd_shift"; see
+            "nearest" (default) or "fd_shift"; see
             :code:`get_time_domain_detector_response`.
 
         Returns
@@ -735,7 +714,7 @@ class Interferometer(object):
         waveform_generator: bilby.gw.waveform_generator.WaveformGenerator
             A WaveformGenerator with a time-domain source model.
         placement: str
-            "nearest" (default), "subsample" or "fd_shift".
+            "nearest" (default) or "fd_shift".
 
         Returns
         =======
@@ -762,7 +741,7 @@ class Interferometer(object):
         injection_polarizations: dict
             Output of a time-domain source model (polarizations and 'epoch').
         placement: str
-            "nearest" (default), "subsample" or "fd_shift".
+            "nearest" (default) or "fd_shift".
         """
         if not self.strain_data.time_within_data(parameters['geocent_time']):
             logger.warning(

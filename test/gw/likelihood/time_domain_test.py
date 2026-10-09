@@ -11,8 +11,8 @@ import bilby
 from bilby.gw.detector import AutoCovarianceFunction
 from bilby.gw.likelihood import TimeDomainGravitationalWaveTransient
 from bilby.gw.time_domain_utils import (
-    GohbergSemenculInverse,
     fractional_time_shift,
+    gohberg_semencul_product,
     gohberg_semencul_vectors,
     place_time_domain_signal,
 )
@@ -69,7 +69,7 @@ class TestGohbergSemencul(unittest.TestCase):
             x, y = gohberg_semencul_vectors(acf[:number_of_samples])
             vector = rng.normal(size=number_of_samples)
             expected = np.linalg.solve(scipy.linalg.toeplitz(acf[:number_of_samples]), vector)
-            np.testing.assert_allclose(GohbergSemenculInverse(x, y)(vector), expected,
+            np.testing.assert_allclose(gohberg_semencul_product(x, y, vector), expected,
                                        rtol=0, atol=1e-10 * np.max(abs(expected)))
 
 
@@ -150,27 +150,10 @@ class TestAutoCovarianceFunction(unittest.TestCase):
         with self.assertRaises(ValueError):
             acf.get_acf_array(len(acf.acf_array) + 1)
 
-    def test_save_and_read(self):
-        acf = AutoCovarianceFunction.from_power_spectral_density_array(
-            self.frequencies, self.psd, 20, 400)
-        directory = tempfile.mkdtemp()
-        try:
-            filename = os.path.join(directory, "acf.dat")
-            acf.save(filename)
-            new = AutoCovarianceFunction.from_file(filename)
-            single = os.path.join(directory, "acf_single.dat")
-            np.savetxt(single, acf.acf_array)
-            from_single = AutoCovarianceFunction.from_file(single, sampling_frequency=1024)
-        finally:
-            shutil.rmtree(directory)
-        self.assertAlmostEqual(new.sampling_frequency, acf.sampling_frequency)
-        np.testing.assert_allclose(new.acf_array, acf.acf_array, rtol=1e-12)
-        np.testing.assert_allclose(from_single.acf_array, acf.acf_array, rtol=1e-12)
-
 
 class TestTimeDomainLikelihood(unittest.TestCase):
     def test_zero_noise_log_likelihood_ratio_is_half_snr_squared(self):
-        for placement in ["nearest", "subsample", "fd_shift"]:
+        for placement in ["nearest", "fd_shift"]:
             for segment, kwargs in SEGMENTS.items():
                 with self.subTest(placement=placement, segment=segment):
                     ifos = interferometers(**kwargs)
@@ -334,7 +317,7 @@ class TestTimeDomainData(unittest.TestCase):
     def test_downsample(self):
         ifo = self._sine_data(1000.0, 16)
         ifo.analysis_window = (1006.0, 4)
-        ifo.downsample_strain_data(1024)
+        ifo.condition_strain_data(1024)
         self.assertEqual(ifo.sampling_frequency, 1024)
         self.assertAlmostEqual(ifo.analysis_time_array[0], 1006.0)
         self.assertEqual(len(ifo.analysis_data), 4096)
@@ -345,7 +328,7 @@ class TestTimeDomainData(unittest.TestCase):
     def test_downsample_data_slightly_off_grid(self):
         ifo = self._sine_data(1004.0001, 8)
         ifo.analysis_window = (1006.0, 4)
-        ifo.downsample_strain_data(1024)
+        ifo.condition_strain_data(1024)
         self.assertEqual(len(ifo.analysis_data), 4096)
         self.assertAlmostEqual(ifo.analysis_time_array[0], 1006.0, 3)
 
@@ -353,12 +336,11 @@ class TestTimeDomainData(unittest.TestCase):
         ifo = self._sine_data(1005.0, 6)
         ifo.analysis_window = (1006.0, 4)
         with self.assertRaises(ValueError):
-            ifo.downsample_strain_data(1024)
+            ifo.condition_strain_data(1024)
 
-    def test_no_conditioning_keeps_data(self):
+    def test_data_not_conditioned_by_default(self):
         ifo = self._sine_data(1000.0, 16)
         ifo.analysis_window = (1006.0, 4)
-        ifo.downsample_strain_data(4096)
         self.assertEqual(len(ifo.time_domain_strain), 16 * 4096)
         self.assertAlmostEqual(ifo.analysis_time_array[0], 1006.0)
         self.assertEqual(len(ifo.analysis_data), 4 * 4096)
@@ -368,7 +350,7 @@ class TestTimeDomainData(unittest.TestCase):
         ifos.set_analysis_windows(duration=16, start_time=1000)
         ifos.set_strain_data_from_power_spectral_densities_time_domain(4096, random_state=2)
         ifos.set_analysis_windows(duration=4, start_time=1006)
-        ifos.downsample_strain_data(2048)
+        ifos.condition_strain_data(2048)
         for ifo in ifos:
             self.assertEqual(ifo.sampling_frequency, 2048)
             self.assertAlmostEqual(ifo.analysis_time_array[0], 1006.0)
@@ -479,7 +461,7 @@ class TestNoiseInputs(unittest.TestCase):
             noise, SAMPLING_FREQUENCY, analysis_duration=1, minimum_frequency=20, maximum_frequency=448)
         times = np.arange(SAMPLING_FREQUENCY) / SAMPLING_FREQUENCY
         signal = 1e-22 * np.exp(-0.5 * ((times - 0.5) / 0.05) ** 2) * np.sin(2 * np.pi * 120 * times)
-        snr_squared = [GohbergSemenculInverse(*acf.gohberg_semencul_vectors(len(times)))(signal) @ signal
+        snr_squared = [gohberg_semencul_product(*acf.gohberg_semencul_vectors(len(times)), signal) @ signal
                        for acf in [ifo.autocovariance_function, from_data]]
         self.assertAlmostEqual(snr_squared[1] / snr_squared[0], 1, delta=0.1)
 

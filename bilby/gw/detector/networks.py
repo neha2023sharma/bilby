@@ -294,20 +294,24 @@ class InterferometerList(list):
         for interferometer in self:
             interferometer.set_autocovariance_function_from_power_spectral_density(**kwargs)
 
-    def downsample_strain_data(self, sampling_frequency, **kwargs):
-        """Condition and downsample the time-domain strain data of each
-        detector around its analysis window.
+    def condition_strain_data(self, sampling_frequency, trim=0.25, remove_mean=True):
+        """Downsample the time-domain strain data of each detector around its
+        analysis window.
 
-        See :py:meth:`bilby.gw.detector.Interferometer.downsample_strain_data`
-        for the keyword arguments.
+        See :py:meth:`bilby.gw.detector.Interferometer.condition_strain_data`.
 
         Parameters
         ==========
         sampling_frequency: float
             The new sampling frequency (Hz).
+        trim: float
+            Fraction of the data at each end that is removed (default 0.25).
+        remove_mean: bool
+            Subtract the mean of the result (default True).
         """
         for interferometer in self:
-            interferometer.downsample_strain_data(sampling_frequency, **kwargs)
+            interferometer.condition_strain_data(
+                sampling_frequency, trim=trim, remove_mean=remove_mean)
 
     def inject_signal_time_domain(
         self,
@@ -330,7 +334,7 @@ class InterferometerList(list):
             A WaveformGenerator with a time-domain source model. The waveform is
             generated once and projected onto every detector.
         placement: str
-            "nearest" (default), "subsample" or "fd_shift"; see
+            "nearest" (default) or "fd_shift"; see
             :code:`bilby.gw.time_domain_utils.place_time_domain_signal`.
 
         Returns

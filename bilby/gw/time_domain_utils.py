@@ -10,7 +10,7 @@ import numpy as np
 from scipy.fft import next_fast_len
 from scipy.linalg import solve_toeplitz
 
-PLACEMENT_METHODS = ("nearest", "subsample", "fd_shift")
+PLACEMENT_METHODS = ("nearest", "fd_shift")
 
 
 def gohberg_semencul_vectors(acf):
@@ -35,52 +35,46 @@ def gohberg_semencul_vectors(acf):
     return x, x[::-1]
 
 
-class GohbergSemenculInverse(object):
-    """ Inverse of a symmetric Toeplitz matrix in Gohberg-Semencul form
+def gohberg_semencul_product(x, y, vector):
+    """ Product :math:`C^{-1} v` of the inverse of a symmetric Toeplitz matrix
+    with a vector, from its Gohberg-Semencul vectors, without forming
+    :math:`C^{-1}`:
 
     .. math::
 
-        C^{-1} = \\frac{1}{x_0} \\left[ L(x) L(x)^T - L(Z y) L(Z y)^T \\right]
+        C^{-1} v = \\frac{1}{x_0} \\left[ L(x) L(x)^T v - L(Z y) L(Z y)^T v \\right],
 
     where :math:`L(w)` is the lower-triangular Toeplitz matrix with first
-    column :math:`w` and :math:`Z` shifts down by one sample. The Fourier
-    transforms of :math:`x` and :math:`Z y` are computed once, so each product
-    :math:`C^{-1} v` costs one forward and two inverse FFTs per factor, of
-    length :code:`next_fast_len(2 N - 1)`.
+    column :math:`w` and :math:`Z` shifts down by one sample. Each product
+    with a triangular Toeplitz matrix is computed with FFTs of length
+    :code:`next_fast_len(2 N - 1)`.
 
     Parameters
     ==========
     x, y: array_like
         Gohberg-Semencul vectors from :code:`gohberg_semencul_vectors`.
+    vector: array_like
+        The vector v, of the same length as x.
+
+    Returns
+    =======
+    array_like: :math:`C^{-1} v`
     """
+    x = np.asarray(x, dtype=float)
+    number_of_samples = len(x)
+    fft_length = next_fast_len(2 * number_of_samples - 1, real=True)
+    x_fft = np.fft.rfft(x, n=fft_length)
+    zy_fft = np.fft.rfft(np.concatenate(([0.0], np.asarray(y, dtype=float)[:-1])), n=fft_length)
 
-    def __init__(self, x, y):
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
-        self.number_of_samples = len(x)
-        self.fft_length = next_fast_len(2 * self.number_of_samples - 1, real=True)
-        self.x0 = x[0]
-        self._x_fft = np.fft.rfft(x, n=self.fft_length)
-        self._zy_fft = np.fft.rfft(np.concatenate(([0.0], y[:-1])), n=self.fft_length)
-
-    def _lower(self, w_fft, vector_fft):
+    def lower(w_fft, vector_fft):
         """ L(w) v from the transforms of w and v. """
-        return np.fft.irfft(w_fft * vector_fft, n=self.fft_length)[:self.number_of_samples]
+        return np.fft.irfft(w_fft * vector_fft, n=fft_length)[:number_of_samples]
 
-    def __call__(self, vector):
-        """ C^-1 vector. """
-        vector = np.asarray(vector, dtype=float)
-        if len(vector) != self.number_of_samples:
-            raise ValueError(
-                f"vector has {len(vector)} samples, expected {self.number_of_samples}")
-        n = self.fft_length
-        # L(w)^T v = reverse(L(w) reverse(v))
-        reversed_fft = np.fft.rfft(vector[::-1], n=n)
-        first = self._lower(self._x_fft, np.fft.rfft(
-            self._lower(self._x_fft, reversed_fft)[::-1], n=n))
-        second = self._lower(self._zy_fft, np.fft.rfft(
-            self._lower(self._zy_fft, reversed_fft)[::-1], n=n))
-        return (first - second) / self.x0
+    # L(w)^T v = reverse(L(w) reverse(v))
+    reversed_fft = np.fft.rfft(np.asarray(vector, dtype=float)[::-1], n=fft_length)
+    first = lower(x_fft, np.fft.rfft(lower(x_fft, reversed_fft)[::-1], n=fft_length))
+    second = lower(zy_fft, np.fft.rfft(lower(zy_fft, reversed_fft)[::-1], n=fft_length))
+    return (first - second) / x[0]
 
 
 def fractional_time_shift(signal, fraction, pad=32):
@@ -110,37 +104,6 @@ def fractional_time_shift(signal, fraction, pad=32):
     shifted = np.fft.irfft(
         np.fft.rfft(buffer) * np.exp(-2j * np.pi * frequencies * fraction), n=length)
     return shifted[:len(signal) + 2 * pad]
-
-
-def align_peak_to_sample(waveform_polarizations, pad=32):
-    """ Shift all polarizations by the same sub-sample amount so that the
-    (quadratically interpolated) peak of :math:`h_+^2 + h_\\times^2` falls
-    exactly on a sample (:code:`ringdown`'s :code:`subsample_placement`).
-
-    Parameters
-    ==========
-    waveform_polarizations: dict
-        Polarizations on their own uniform grid (no 'epoch' key).
-    pad: int
-        Zero padding added on each side before shifting.
-
-    Returns
-    =======
-    aligned: dict
-        The shifted polarizations (each padded by :code:`pad` on both sides).
-    peak_index: int
-        Index of the peak in the aligned arrays.
-    """
-    amplitude = np.sqrt(waveform_polarizations["plus"] ** 2 + waveform_polarizations["cross"] ** 2)
-    # peak from a quadratic fit to the three samples around the maximum
-    ib = int(np.argmax(amplitude))
-    a, b, c = amplitude[ib - 1], amplitude[ib], amplitude[(ib + 1) % len(amplitude)]
-    denominator = a - 2 * b + c
-    peak = float(ib) if denominator == 0 else ib + (3 * a - 4 * b + c) / (2 * denominator) - 1
-    fraction = round(peak) - peak
-    aligned = {mode: fractional_time_shift(value, fraction, pad=pad)
-               for mode, value in waveform_polarizations.items()}
-    return aligned, int(round(peak)) + pad
 
 
 def _copy_into_segment(signal, offset, number_of_samples):
@@ -177,9 +140,6 @@ def place_time_domain_signal(signal, merger_index, arrival_index, number_of_samp
     placement: str
         - "nearest" (default): `merger_index` and `arrival_index` are each
           rounded to the nearest sample.
-        - "subsample": as "nearest", with `merger_index` the peak index
-          returned by :code:`align_peak_to_sample`, so that `arrival_index`
-          refers to the peak of :math:`h_+^2 + h_\\times^2`.
         - "fd_shift": whole samples are shifted by index and the remaining
           fraction with a Fourier phase shift of a zero-padded copy.
 
@@ -187,7 +147,7 @@ def place_time_domain_signal(signal, merger_index, arrival_index, number_of_samp
     =======
     array_like: The signal on the data samples.
     """
-    if placement in ("nearest", "subsample"):
+    if placement == "nearest":
         offset = round(arrival_index) - round(merger_index)
         return _copy_into_segment(signal, offset, number_of_samples)
     elif placement == "fd_shift":

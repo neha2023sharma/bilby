@@ -198,36 +198,10 @@ class AutoCovarianceFunction(object):
             sampling_frequency=sampling_frequency, fill_value=fill_value,
             fill_multiplier=fill_multiplier)
 
-    @classmethod
-    def from_file(cls, filename, sampling_frequency=None):
-        """ Read a precomputed ACF from a text file.
-
-        Parameters
-        ==========
-        filename: str
-            File with either two columns, lag (s) and ACF (as written by
-            :code:`save`), or a single column with the ACF.
-        sampling_frequency: float, optional
-            Sampling frequency of the lags (Hz). Required for a single-column
-            file; for a two-column file it is computed from the lags.
-
-        Returns
-        =======
-        AutoCovarianceFunction
-        """
-        data = np.loadtxt(filename)
-        if data.ndim == 2:
-            return cls(acf_array=data[:, 1], sampling_frequency=1 / (data[1, 0] - data[0, 0]))
-        if sampling_frequency is None:
-            raise ValueError("sampling_frequency is required for a single-column ACF file")
-        return cls(acf_array=data, sampling_frequency=sampling_frequency)
-
     def get_acf_array(self, number_of_samples):
         """ First `number_of_samples` lags of the ACF.
 
-        A ValueError is raised if the ACF is shorter than `number_of_samples`,
-        and a warning is logged if it is shorter than twice
-        `number_of_samples`.
+        A ValueError is raised if the ACF is shorter than `number_of_samples`.
 
         Parameters
         ==========
@@ -242,10 +216,6 @@ class AutoCovarianceFunction(object):
             raise ValueError(
                 f"The analysis segment ({number_of_samples} samples) is longer than the ACF "
                 f"({len(self.acf_array)} samples)")
-        if 2 * number_of_samples > len(self.acf_array):
-            logger.warning(
-                f"The ACF ({len(self.acf_array)} samples) is shorter than twice the analysis "
-                f"segment ({number_of_samples} samples)")
         return self.acf_array[:number_of_samples]
 
     def gohberg_semencul_vectors(self, number_of_samples):
@@ -263,17 +233,6 @@ class AutoCovarianceFunction(object):
             See :code:`bilby.gw.time_domain_utils.gohberg_semencul_vectors`.
         """
         return gohberg_semencul_vectors(self.get_acf_array(number_of_samples))
-
-    def save(self, filename):
-        """ Save the ACF to a text file with two columns, lag (s) and ACF.
-
-        Parameters
-        ==========
-        filename: str
-            Name of the output file.
-        """
-        lags = np.arange(len(self.acf_array)) / self.sampling_frequency
-        np.savetxt(filename, np.array([lags, self.acf_array]).T, header="lag acf")
 
 
 def read_power_spectral_densities_from_hdf5(filename, interferometers, label=None):

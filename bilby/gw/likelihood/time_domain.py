@@ -2,7 +2,7 @@ import copy
 
 import numpy as np
 
-from ..time_domain_utils import PLACEMENT_METHODS
+from ..time_domain_utils import PLACEMENT_METHODS, gohberg_semencul_product
 from .base import GravitationalWaveTransient
 
 
@@ -21,9 +21,10 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
         - \\frac{1}{2} h^T C^{-1} h - \\frac{1}{2} d^T C^{-1} d \\right].
 
     :code:`log_likelihood_ratio` returns the first two terms and
-    :code:`noise_log_likelihood` the last. :math:`C^{-1}` is applied with the
-    operator stored on each interferometer
-    (:code:`interferometer.inverse_covariance`).
+    :code:`noise_log_likelihood` the last. Products with :math:`C^{-1}` are
+    computed from the Gohberg-Semencul vectors stored on each interferometer
+    (:code:`interferometer.gohberg_semencul_vectors`), without forming
+    :math:`C^{-1}`.
 
     The template is projected onto each interferometer and placed so that the
     model's t=0 arrives at geocent_time plus the time delay from the
@@ -58,10 +59,9 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
         Name of the reference for the sampled time parameter, as in
         :code:`GravitationalWaveTransient`.
     placement: str, optional
-        How the template is placed on the data samples: "nearest" (default),
-        "subsample" or "fd_shift"; see
-        :code:`bilby.gw.time_domain_utils.place_time_domain_signal`. Use the
-        same placement for injection and analysis.
+        How the template is placed on the data samples: "nearest" (default)
+        or "fd_shift"; see :code:`bilby.gw.time_domain_utils.place_time_domain_signal`.
+        Use the same placement for injection and analysis.
     time_marginalization, phase_marginalization, calibration_marginalization: bool
         Not implemented for this likelihood; must be False.
 
@@ -133,7 +133,8 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
                     f"{acf.sampling_frequency:g} Hz differs from the data's "
                     f"{interferometer.sampling_frequency:g} Hz")
             data = interferometer.analysis_data
-            data_times_inverse_covariance = interferometer.inverse_covariance(data)
+            data_times_inverse_covariance = gohberg_semencul_product(
+                *interferometer.gohberg_semencul_vectors, data)
             self._data_times_inverse_covariance[interferometer.name] = data_times_inverse_covariance
             self._data_inverse_covariance_data[interferometer.name] = float(
                 np.dot(data_times_inverse_covariance, data))
@@ -180,7 +181,8 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
             parameters=parameters,
         )
         d_inner_h = float(np.dot(self._data_times_inverse_covariance[interferometer.name], signal))
-        optimal_snr_squared = float(np.dot(signal, interferometer.inverse_covariance(signal)))
+        optimal_snr_squared = float(np.dot(
+            signal, gohberg_semencul_product(*interferometer.gohberg_semencul_vectors, signal)))
         if optimal_snr_squared > 0:
             matched_filter_snr = d_inner_h / optimal_snr_squared ** 0.5
         else:

@@ -1,12 +1,9 @@
 import numpy as np
 
 
-def condition_strain_data(
-        strain_data, sampling_frequency, start_time, duration, minimum_frequency=None,
-        maximum_frequency=None, anti_aliasing="fft", trim=0.25, remove_mean=True,
-        decimate_kwargs=None):
-    """ Condition and downsample time-domain strain data around an analysis
-    window.
+def condition_strain_data(strain_data, sampling_frequency, start_time, duration, trim=0.25,
+                          remove_mean=True):
+    """ Downsample time-domain strain data around an analysis window.
 
     Steps:
 
@@ -16,16 +13,12 @@ def condition_strain_data(
        not cover them.
     2. Shift the data by fewer than `factor` samples (factor = current / new
        sampling frequency) so that the sample nearest `start_time` is kept.
-    3. If `minimum_frequency` and/or `maximum_frequency` are given, apply an
-       order-4 Butterworth high-, low- or band-pass filter forwards and
-       backwards.
-    4. Anti-aliasing and decimation: with `anti_aliasing="fft"`, multiply by a
-       Tukey window with alpha = `trim`, set all frequencies above the new
-       Nyquist frequency to zero and keep every factor-th sample; with
-       `anti_aliasing="decimate"`, use :code:`scipy.signal.decimate`.
-    5. Remove a fraction `trim` of the samples at each end; this removes the
+    3. Multiply by a Tukey window with alpha = `trim`, set all frequencies
+       above the new Nyquist frequency to zero and keep every factor-th
+       sample.
+    4. Remove a fraction `trim` of the samples at each end; this removes the
        buffer. Samples in the window are always kept.
-    6. Subtract the mean if `remove_mean`.
+    5. Subtract the mean if `remove_mean`.
 
     The result replaces the data in `strain_data`.
 
@@ -39,20 +32,11 @@ def condition_strain_data(
         GPS start time of the analysis window (s).
     duration: float
         Duration of the analysis window (s).
-    minimum_frequency: float, optional
-        High-pass corner frequency of the Butterworth filter (Hz).
-    maximum_frequency: float, optional
-        Low-pass corner frequency of the Butterworth filter (Hz).
-    anti_aliasing: str
-        "fft" (default) or "decimate".
     trim: float
         Fraction of the data at each end that is removed (default 0.25).
     remove_mean: bool
         Subtract the mean of the result (default True).
-    decimate_kwargs: dict, optional
-        Keyword arguments of :code:`scipy.signal.decimate`.
     """
-    from scipy import signal
     from scipy.signal.windows import tukey
 
     original_sampling_frequency = float(strain_data.sampling_frequency)
@@ -79,35 +63,18 @@ def condition_strain_data(
 
     shift = int(np.argmin(abs(times - start_time))) % factor
     if trim > 0:
-        # the wrapped samples are at the end and are removed in step 5
+        # the wrapped samples are at the end and are removed in step 4
         times = np.roll(times, -shift)
         strain = np.roll(strain, -shift)
     else:
         times = times[shift:]
         strain = strain[shift:]
 
-    nyquist_frequency = 0.5 * original_sampling_frequency
-    if minimum_frequency or maximum_frequency:
-        if minimum_frequency and not maximum_frequency:
-            b, a = signal.butter(4, minimum_frequency / nyquist_frequency, btype="highpass")
-        elif maximum_frequency and not minimum_frequency:
-            b, a = signal.butter(4, maximum_frequency / nyquist_frequency, btype="lowpass")
-        else:
-            b, a = signal.butter(4, (minimum_frequency / nyquist_frequency,
-                                     maximum_frequency / nyquist_frequency), btype="bandpass")
-        strain = signal.filtfilt(b, a, strain)
-
-    if factor > 1:
-        if anti_aliasing == "fft":
-            strain_fd = np.fft.rfft(strain * tukey(len(strain), trim))
-            frequencies = np.fft.rfftfreq(len(strain), 1 / original_sampling_frequency)
-            strain_fd[frequencies > nyquist_frequency / factor] = 0
-            strain = np.fft.irfft(strain_fd, n=len(strain))[::factor]
-        elif anti_aliasing == "decimate":
-            strain = signal.decimate(strain, factor, zero_phase=True, **(decimate_kwargs or {}))
-        else:
-            raise ValueError("anti_aliasing must be 'fft' or 'decimate'")
-        times = times[::factor]
+    strain_fd = np.fft.rfft(strain * tukey(len(strain), trim))
+    frequencies = np.fft.rfftfreq(len(strain), 1 / original_sampling_frequency)
+    strain_fd[frequencies > sampling_frequency / 2] = 0
+    strain = np.fft.irfft(strain_fd, n=len(strain))[::factor]
+    times = times[::factor]
 
     # remove the fraction trim at each end, but always keep the window
     window_first = int(np.argmin(abs(times - start_time)))

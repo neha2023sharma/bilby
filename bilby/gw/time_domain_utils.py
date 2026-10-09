@@ -2,7 +2,7 @@
 Utilities for time-domain gravitational-wave inference.
 
 * Gohberg-Semencul representation of the inverse of a symmetric Toeplitz
-  noise covariance matrix, and the noise-weighted inner products built on it.
+  noise covariance matrix.
 * Placement of a time-domain waveform, generated on its own uniform grid, into
   a segment of detector data.
 """
@@ -83,77 +83,6 @@ class GohbergSemenculInverse(object):
         return (first - second) / self.x0
 
 
-def gohberg_semencul_product(x, y, vector):
-    """ Compute C^-1 v using the Gohberg-Semencul representation, see
-    :code:`GohbergSemenculInverse`. To apply the same C^-1 many times, build a
-    :code:`GohbergSemenculInverse` once instead.
-
-    Parameters
-    ==========
-    x, y: array_like
-        Gohberg-Semencul vectors from :code:`gohberg_semencul_vectors`.
-    vector: array_like
-        The vector to multiply, same length as x.
-
-    Returns
-    =======
-    array_like: C^-1 vector
-    """
-    return GohbergSemenculInverse(x, y)(vector)
-
-
-def time_domain_noise_weighted_inner_product(aa, bb, x, y):
-    """ Noise-weighted inner product :math:`a^T C^{-1} b`.
-
-    Parameters
-    ==========
-    aa, bb: array_like
-        Time series of equal length.
-    x, y: array_like
-        Gohberg-Semencul vectors of C^-1 for that length.
-
-    Returns
-    =======
-    float: The noise-weighted inner product.
-    """
-    return float(np.dot(aa, gohberg_semencul_product(x, y, bb)))
-
-
-def time_domain_optimal_snr_squared(signal, x, y):
-    """ Optimal SNR squared :math:`h^T C^{-1} h` of a time-domain signal. """
-    return time_domain_noise_weighted_inner_product(signal, signal, x, y)
-
-
-def time_domain_matched_filter_snr(signal, time_domain_strain, x, y):
-    """ Matched-filter SNR :math:`d^T C^{-1} h / \\sqrt{h^T C^{-1} h}`. """
-    return (
-        time_domain_noise_weighted_inner_product(time_domain_strain, signal, x, y)
-        / time_domain_optimal_snr_squared(signal, x, y) ** 0.5
-    )
-
-
-def one_sided_tukey_window(number_of_samples, alpha):
-    """ Tukey window with only the rising (left) half applied.
-
-    Parameters
-    ==========
-    number_of_samples: int
-        Length of the window.
-    alpha: float
-        Shape parameter of :code:`scipy.signal.windows.tukey`; 0 returns ones.
-
-    Returns
-    =======
-    array_like: The window.
-    """
-    from scipy.signal.windows import tukey
-    if not alpha:
-        return np.ones(number_of_samples)
-    window = tukey(number_of_samples, alpha)
-    window[number_of_samples // 2:] = 1.0
-    return window
-
-
 def fractional_time_shift(signal, fraction, pad=32):
     """ Delay a time series by a fraction of a sample with a Fourier phase
     shift, on a zero-padded copy so that nothing wraps around.
@@ -183,31 +112,6 @@ def fractional_time_shift(signal, fraction, pad=32):
     return shifted[:len(signal) + 2 * pad]
 
 
-def quadratic_peak_index(plus, cross):
-    """ Fractional index of the peak of :math:`\\sqrt{h_+^2 + h_\\times^2}`,
-    from a quadratic fit to the three samples around the maximum (as in the
-    :code:`ringdown` package).
-
-    Parameters
-    ==========
-    plus, cross: array_like
-        The two polarizations on a uniform grid.
-
-    Returns
-    =======
-    float: Peak position in (fractional) samples.
-    """
-    amplitude = np.sqrt(np.asarray(plus) ** 2 + np.asarray(cross) ** 2)
-    ib = int(np.argmax(amplitude))
-    ia = (ib - 1) % len(amplitude)
-    ic = (ib + 1) % len(amplitude)
-    a, b, c = amplitude[ia], amplitude[ib], amplitude[ic]
-    denominator = a - 2 * b + c
-    if denominator == 0:
-        return float(ib)
-    return ib + (3 * a - 4 * b + c) / (2 * denominator) - 1
-
-
 def align_peak_to_sample(waveform_polarizations, pad=32):
     """ Shift all polarizations by the same sub-sample amount so that the
     (quadratically interpolated) peak of :math:`h_+^2 + h_\\times^2` falls
@@ -227,8 +131,12 @@ def align_peak_to_sample(waveform_polarizations, pad=32):
     peak_index: int
         Index of the peak in the aligned arrays.
     """
-    peak = quadratic_peak_index(
-        waveform_polarizations["plus"], waveform_polarizations["cross"])
+    amplitude = np.sqrt(waveform_polarizations["plus"] ** 2 + waveform_polarizations["cross"] ** 2)
+    # peak from a quadratic fit to the three samples around the maximum
+    ib = int(np.argmax(amplitude))
+    a, b, c = amplitude[ib - 1], amplitude[ib], amplitude[(ib + 1) % len(amplitude)]
+    denominator = a - 2 * b + c
+    peak = float(ib) if denominator == 0 else ib + (3 * a - 4 * b + c) / (2 * denominator) - 1
     fraction = round(peak) - peak
     aligned = {mode: fractional_time_shift(value, fraction, pad=pad)
                for mode, value in waveform_polarizations.items()}

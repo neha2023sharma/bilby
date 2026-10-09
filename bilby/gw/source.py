@@ -817,7 +817,7 @@ def _base_lal_cbc_td_waveform(
     waveform's full length.
     """
     import lalsimulation as lalsim
-    from .time_domain_utils import one_sided_tukey_window
+    from scipy.signal.windows import tukey
 
     waveform_approximant = waveform_kwargs.pop('waveform_approximant')
     reference_frequency = waveform_kwargs.pop('reference_frequency')
@@ -880,7 +880,8 @@ def _base_lal_cbc_td_waveform(
     if len(waveform_kwargs) > 0:
         raise ValueError(UNUSED_KWARGS_MESSAGE.format(waveform_kwargs=waveform_kwargs))
 
-    window = one_sided_tukey_window(hplus.data.length, turn_on_window)
+    window = tukey(hplus.data.length, turn_on_window)
+    window[hplus.data.length // 2:] = 1
     epoch = hplus.epoch.gpsSeconds + hplus.epoch.gpsNanoSeconds * 1e-9
     return dict(plus=window * hplus.data.data, cross=window * hcross.data.data, epoch=epoch)
 

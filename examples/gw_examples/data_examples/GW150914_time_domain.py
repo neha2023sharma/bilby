@@ -5,7 +5,8 @@ Tutorial to demonstrate running time-domain parameter estimation on GW150914
 This is the GW150914.py analysis done in the time domain:
 
 - the strain is downloaded as a time series covering the 4 s analysis window
-  and 2 s on each side, downsampled to 2048 Hz and cropped to the window;
+  and 2 s on each side and downsampled to 2048 Hz; the likelihood uses the
+  data in the window (interferometer.analysis_data);
 - the noise model of each detector is an autocovariance function (ACF)
   computed from a PSD read with its frequency array from an HDF5 file;
 - the likelihood is bilby.gw.likelihood.TimeDomainGravitationalWaveTransient,
@@ -57,7 +58,7 @@ ifo_list = bilby.gw.detector.InterferometerList([])
 for det in detectors:
     logger.info("Downloading analysis data for ifo {}".format(det))
     ifo = bilby.gw.detector.get_empty_interferometer(det)
-    ifo.set_analysis_window(start_time=start_time, duration=duration)
+    ifo.analysis_window = (start_time, duration)
     data = TimeSeries.fetch_open_data(det, start_time - padding, end_time + padding)
     ifo.strain_data.set_from_gwpy_timeseries(data)
     ifo.downsample_strain_data(sampling_frequency)
@@ -71,7 +72,7 @@ for det in detectors:
 
     # The ACF lasts 1 / (frequency spacing of the PSD), 8 s here, twice the
     # analysis segment. Outside [minimum_frequency, maximum_frequency] the PSD
-    # is set to fill_value (default 1e4) times its maximum inside the band.
+    # is set to fill_multiplier (default 1e4) times its maximum inside the band.
     ifo.autocovariance_function = (
         bilby.gw.detector.AutoCovarianceFunction.from_power_spectral_density_array(
             frequency_array,

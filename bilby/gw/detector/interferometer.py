@@ -15,10 +15,9 @@ from .calibration import Recalibrate
 from .geometry import InterferometerGeometry
 from .strain_data import InterferometerStrainData
 from ..time_domain_utils import (
+    GohbergSemenculInverse,
     align_peak_to_sample,
     place_time_domain_signal,
-    time_domain_matched_filter_snr,
-    time_domain_optimal_snr_squared,
 )
 from ..conversion import generate_all_bbh_parameters
 
@@ -103,6 +102,7 @@ class Interferometer(object):
         self._analysis_window = None
         self._injected_signal = None
         self.gohberg_semencul_vectors = None
+        self.inverse_covariance = None
 
     def __eq__(self, other):
         if self.name == other.name and \
@@ -275,32 +275,32 @@ class Interferometer(object):
 
     @property
     def analysis_window(self):
-        """ The analysis window, dict(start_time, duration), or None. """
+        """ The stretch of data analysed with a time-domain likelihood,
+        dict(start_time, duration), or None.
+
+        Set it with :code:`interferometer.analysis_window = (start_time, duration)`,
+        with the GPS start time and the duration in seconds. The data in the
+        window (:code:`analysis_data`) are used by time-domain likelihoods,
+        and the Gohberg-Semencul vectors of the inverse noise covariance matrix
+        are computed for its length.
+        """
         return self._analysis_window
 
-    def set_analysis_window(self, start_time, duration):
-        """ Set the stretch of data analysed with a time-domain likelihood.
-
-        The time-domain data methods (noise generation, downsampling,
-        cropping) put exactly this window in the strain data, and the
-        Gohberg-Semencul vectors of the inverse noise covariance matrix are
-        computed for its length.
-
-        Parameters
-        ==========
-        start_time: float
-            GPS start time of the window (s).
-        duration: float
-            Duration of the window (s).
-        """
+    @analysis_window.setter
+    def analysis_window(self, window):
+        if window is None:
+            self._analysis_window = None
+            self.meta_data.pop("analysis_window", None)
+            return
+        start_time, duration = window
         self._analysis_window = dict(start_time=float(start_time), duration=float(duration))
         self.meta_data["analysis_window"] = dict(self._analysis_window)
-        if self.autocovariance_function is not None:
+        if self.autocovariance_function is not None and self.autocovariance_function.acf_array is not None:
             self._set_gohberg_semencul_vectors()
 
     def _require_analysis_window(self):
         if self.analysis_window is None:
-            raise ValueError(f"{self.name}: set the analysis window first (set_analysis_window)")
+            raise ValueError(f"{self.name}: set the analysis window first (analysis_window)")
         return self.analysis_window["start_time"], self.analysis_window["duration"]
 
     def set_strain_data_from_power_spectral_density_time_domain(
@@ -337,100 +337,63 @@ class Interferometer(object):
             sampling_frequency=sampling_frequency, duration=duration, start_time=start_time)
         self._injected_signal = None
 
-    def crop_strain_data(self):
-        """ Crop the time-domain strain data to the analysis window, keeping
-        the samples nearest to its start. """
-        start_time, duration = self._require_analysis_window()
-        self._store_strain_data(*[
-            self._cropped(series, start_time, duration)
-            for series in (self.strain_data, self._injected_signal_data())])
-
     def downsample_strain_data(self, sampling_frequency, **kwargs):
-        """ Condition and downsample the time-domain strain data, and crop it
-        to the analysis window.
+        """ Condition and downsample the time-domain strain data around the
+        analysis window.
 
-        The data must cover the analysis window plus, on each side, a buffer
-        of `trim` / (1 - 2 `trim`) times its duration (half the duration for
-        the default `trim` = 0.25), which is removed by the conditioning.
-        Longer data are first cropped to the window and buffer. If the data
-        are already at `sampling_frequency` and no filter is requested, they
-        are cropped to the window directly.
+        See :code:`bilby.gw.detector.condition_data.condition_strain_data`. If
+        the data are already at `sampling_frequency` and no filter is
+        requested, they are left unchanged.
 
         Parameters
         ==========
         sampling_frequency: float
             New sampling frequency (Hz); must divide the current one.
         kwargs:
-            Passed to :code:`InterferometerStrainData.downsample`
-            (minimum_frequency, maximum_frequency, anti_aliasing, trim,
-            remove_mean, decimate_kwargs).
+            Passed to :code:`condition_strain_data` (minimum_frequency,
+            maximum_frequency, anti_aliasing, trim, remove_mean,
+            decimate_kwargs).
         """
+        from .condition_data import condition_strain_data
         start_time, duration = self._require_analysis_window()
         no_filter = kwargs.get("minimum_frequency") is None and kwargs.get("maximum_frequency") is None
         if self.strain_data.sampling_frequency == sampling_frequency and no_filter:
-            self.crop_strain_data()
             return
-        trim = kwargs.get("trim", 0.25)
-        buffer = duration * trim / (1 - 2 * trim)
-        tolerance = 1 / self.strain_data.sampling_frequency
-        data_start = self.strain_data.start_time
-        data_end = data_start + self.strain_data.duration
-        if data_start > start_time - buffer + tolerance or data_end < start_time + duration + buffer - tolerance:
-            raise ValueError(
-                f"{self.name}: the data ({data_start:.6f} - {data_end:.6f}) must cover "
-                f"{start_time - buffer:.6f} - {start_time + duration + buffer:.6f}: the analysis "
-                f"window plus {buffer:g} s on each side")
-        crop_start = max(start_time - buffer, data_start)
-        crop_end = min(start_time + duration + buffer, data_end)
-        series = [self._cropped(item, crop_start, crop_end - crop_start)
-                  for item in (self.strain_data, self._injected_signal_data())]
-        for item in series:
-            if item is not None:
-                item.downsample(sampling_frequency, preserve_time=start_time,
-                                start_time=start_time, duration=duration, **kwargs)
-        self._store_strain_data(*series)
-
-    def _store_strain_data(self, strain_data, injected_signal):
-        """ Replace the time-domain strain data (and the injected signal) by
-        the given ones. """
-        self.strain_data.set_from_time_domain_strain(
-            strain_data.time_domain_strain, sampling_frequency=strain_data.sampling_frequency,
-            duration=strain_data.duration, start_time=strain_data.start_time)
-        self._injected_signal = None if injected_signal is None else injected_signal.time_domain_strain
+        if self._injected_signal is not None:
+            # condition the injected signal in the same way, for its SNRs
+            injected_signal = InterferometerStrainData()
+            injected_signal.set_from_time_domain_strain(
+                self._injected_signal, sampling_frequency=self.strain_data.sampling_frequency,
+                duration=self.strain_data.duration, start_time=self.strain_data.start_time)
+            condition_strain_data(injected_signal, sampling_frequency, start_time, duration, **kwargs)
+            self._injected_signal = injected_signal.time_domain_strain
+        condition_strain_data(self.strain_data, sampling_frequency, start_time, duration, **kwargs)
         self._update_injection_snrs()
 
-    @staticmethod
-    def _cropped(strain_data, start_time, duration):
-        """ Copy of `strain_data` cropped to [start_time, start_time + duration)
-        at the nearest samples. """
-        if strain_data is None:
-            return None
-        sampling_frequency = strain_data.sampling_frequency
-        first = int(round((start_time - strain_data.start_time) * sampling_frequency))
+    def _analysis_slice(self):
+        """ Slice of the data samples in the analysis window: from the sample
+        nearest to its start time, `duration` x sampling frequency samples. """
+        start_time, duration = self._require_analysis_window()
+        sampling_frequency = self.strain_data.sampling_frequency
+        first = int(np.argmin(abs(self.strain_data.time_array - start_time)))
         number_of_samples = int(round(duration * sampling_frequency))
-        if first < 0 or first + number_of_samples > len(strain_data.time_domain_strain):
+        if first + number_of_samples > len(self.strain_data.time_array) or (
+                abs(self.strain_data.time_array[first] - start_time) > 1 / sampling_frequency):
             raise ValueError(
-                f"The data ({strain_data.start_time:.6f} - "
-                f"{strain_data.start_time + strain_data.duration:.6f}) do not cover "
-                f"{start_time:.6f} - {start_time + duration:.6f}")
-        cropped = InterferometerStrainData(
-            minimum_frequency=strain_data.minimum_frequency,
-            maximum_frequency=strain_data.maximum_frequency)
-        cropped.set_from_time_domain_strain(
-            np.array(strain_data.time_domain_strain[first:first + number_of_samples], dtype=float),
-            sampling_frequency=sampling_frequency, duration=number_of_samples / sampling_frequency,
-            start_time=strain_data.start_time + first / sampling_frequency)
-        return cropped
+                f"{self.name}: the analysis window ({start_time:.6f} - {start_time + duration:.6f}) "
+                f"is not inside the data ({self.strain_data.start_time:.6f} - "
+                f"{self.strain_data.start_time + self.strain_data.duration:.6f})")
+        return slice(first, first + number_of_samples)
 
-    def _injected_signal_data(self):
-        """ The injected detector signal as strain data on the data samples, or None. """
-        if self._injected_signal is None:
-            return None
-        signal = InterferometerStrainData()
-        signal.set_from_time_domain_strain(
-            self._injected_signal, sampling_frequency=self.strain_data.sampling_frequency,
-            duration=self.strain_data.duration, start_time=self.strain_data.start_time)
-        return signal
+    @property
+    def analysis_data(self):
+        """ The time-domain strain data in the analysis window. """
+        return np.asarray(self.strain_data.time_domain_strain, dtype=float)[self._analysis_slice()]
+
+    @property
+    def analysis_time_array(self):
+        """ The GPS times of the samples in the analysis window. """
+        return self.strain_data.time_array[self._analysis_slice()]
 
     @property
     def autocovariance_function(self):
@@ -448,26 +411,30 @@ class Interferometer(object):
         if autocovariance_function is not None:
             self._require_analysis_window()
         self._autocovariance_function = autocovariance_function
+        self.gohberg_semencul_vectors = None
+        self.inverse_covariance = None
         if autocovariance_function is None:
             self.meta_data.pop("autocovariance_function", None)
-            self.gohberg_semencul_vectors = None
         else:
             self.meta_data["autocovariance_function"] = autocovariance_function.meta_data
-            self._set_gohberg_semencul_vectors()
+            if autocovariance_function.acf_array is not None:
+                self._set_gohberg_semencul_vectors()
 
     def _set_gohberg_semencul_vectors(self):
         """ Compute the Gohberg-Semencul vectors (x, y) of the inverse noise
-        covariance matrix for the analysis window and store them in
-        :code:`gohberg_semencul_vectors`. """
+        covariance matrix for the analysis window, and the operator applying
+        it, and store them in :code:`gohberg_semencul_vectors` and
+        :code:`inverse_covariance`. """
         number_of_samples = int(round(
             self.analysis_window["duration"] * self.autocovariance_function.sampling_frequency))
         self.gohberg_semencul_vectors = self.autocovariance_function.gohberg_semencul_vectors(
             number_of_samples)
+        self.inverse_covariance = GohbergSemenculInverse(*self.gohberg_semencul_vectors)
         self._update_injection_snrs()
 
     def set_autocovariance_function_from_power_spectral_density(
             self, minimum_frequency=None, maximum_frequency=None, sampling_frequency=None,
-            duration_factor=16, fill_value=1e4):
+            duration_factor=16, fill_value=None, fill_multiplier=1e4):
         """ Set the autocovariance function from the power spectral density
         of this interferometer.
 
@@ -489,9 +456,12 @@ class Interferometer(object):
         duration_factor: float
             Duration of the ACF divided by the duration of the analysis
             window (default 16).
-        fill_value: float
-            Multiple of the maximum in-band PSD used outside the band
-            (default 1e4).
+        fill_value: float, optional
+            PSD value used outside the band (strain^2 / Hz). Overrides
+            `fill_multiplier`.
+        fill_multiplier: float
+            Multiple of the maximum in-band PSD used outside the band if
+            `fill_value` is not given (default 1e4).
         """
         from .acf import AutoCovarianceFunction
         _, duration = self._require_analysis_window()
@@ -508,7 +478,7 @@ class Interferometer(object):
         self.autocovariance_function = AutoCovarianceFunction.from_power_spectral_density_array(
             frequency_array, psd_array, minimum_frequency=minimum_frequency,
             maximum_frequency=maximum_frequency, sampling_frequency=sampling_frequency,
-            fill_value=fill_value)
+            fill_value=fill_value, fill_multiplier=fill_multiplier)
 
     def antenna_response(self, ra, dec, time, psi, mode):
         """
@@ -616,11 +586,12 @@ class Interferometer(object):
     def get_time_domain_detector_response(self, waveform_polarizations, parameters,
                                           placement="nearest"):
         """ Get the time-domain detector response for a particular waveform,
-        on the samples of the strain data.
+        on the samples of the analysis window.
 
         The polarizations are projected with the antenna patterns and placed
         so that the model's t=0 arrives at geocent_time plus the time delay
-        from the geocenter. Waveform samples outside the data are dropped.
+        from the geocenter. Waveform samples outside the analysis window are
+        dropped.
 
         Parameters
         ==========
@@ -639,7 +610,7 @@ class Interferometer(object):
 
         Returns
         =======
-        array_like: The detector signal on the data samples.
+        array_like: The detector signal on the samples of the analysis window.
 
         Notes
         =====
@@ -647,6 +618,15 @@ class Interferometer(object):
         used to set the time at which the antenna response is evaluated,
         otherwise the provided :code:`parameters["geocent_time"]` is used.
         """
+        analysis_slice = self._analysis_slice()
+        return self._time_domain_detector_response(
+            waveform_polarizations, parameters, self.strain_data.time_array[analysis_slice.start],
+            analysis_slice.stop - analysis_slice.start, placement)
+
+    def _time_domain_detector_response(self, waveform_polarizations, parameters, start_time,
+                                       number_of_samples, placement):
+        """ Detector response on `number_of_samples` data samples starting
+        at `start_time`; see :code:`get_time_domain_detector_response`. """
         sampling_frequency = self.strain_data.sampling_frequency
         polarizations = {mode: value for mode, value in waveform_polarizations.items()
                          if mode != "epoch"}
@@ -669,26 +649,33 @@ class Interferometer(object):
             parameters['ra'], parameters['dec'], parameters['geocent_time'])
         # Be careful to first subtract the two GPS times which are ~1e9 sec.
         # And then add the time_shift which varies at ~1e-5 sec
-        dt_geocent = parameters['geocent_time'] - self.strain_data.start_time
+        dt_geocent = parameters['geocent_time'] - start_time
         arrival_index = (dt_geocent + time_shift) * sampling_frequency
 
         return place_time_domain_signal(
             signal_ifo, merger_index=merger_index, arrival_index=arrival_index,
-            number_of_samples=len(self.strain_data.time_domain_strain), placement=placement)
+            number_of_samples=number_of_samples, placement=placement)
 
     def _update_injection_snrs(self):
         """ Store the optimal and matched-filter SNRs of the injected signal
-        in :code:`meta_data` if the Gohberg-Semencul vectors match the data. """
-        signal = self._injected_signal
-        vectors = self.gohberg_semencul_vectors
-        if signal is None or vectors is None or len(vectors[0]) != len(signal):
-            for key in ["optimal_SNR", "matched_filter_SNR"]:
-                self.meta_data.pop(key, None)
+        in the analysis window in :code:`meta_data`. """
+        for key in ["optimal_SNR", "matched_filter_SNR"]:
+            self.meta_data.pop(key, None)
+        if (self._injected_signal is None or self.inverse_covariance is None
+                or len(self._injected_signal) != len(self.strain_data.time_domain_strain)):
             return
-        x, y = vectors
-        self.meta_data['optimal_SNR'] = time_domain_optimal_snr_squared(signal, x, y) ** 0.5
-        self.meta_data['matched_filter_SNR'] = time_domain_matched_filter_snr(
-            signal, self.strain_data.time_domain_strain, x, y)
+        try:
+            analysis_slice = self._analysis_slice()
+        except ValueError:
+            return
+        signal = self._injected_signal[analysis_slice]
+        if len(signal) != self.inverse_covariance.number_of_samples:
+            return
+        inverse_covariance_signal = self.inverse_covariance(signal)
+        optimal_snr = float(np.dot(signal, inverse_covariance_signal)) ** 0.5
+        self.meta_data['optimal_SNR'] = optimal_snr
+        self.meta_data['matched_filter_SNR'] = float(
+            np.dot(self.analysis_data, inverse_covariance_signal)) / optimal_snr
         logger.info("{}: optimal SNR = {:.2f}, matched filter SNR = {:.2f}".format(
             self.name, self.meta_data['optimal_SNR'], self.meta_data['matched_filter_SNR']))
 
@@ -696,11 +683,11 @@ class Interferometer(object):
                                   waveform_generator=None, placement="nearest"):
         """ Inject a time-domain signal into the time-domain strain data.
 
-        The detector signal is computed with
-        :code:`get_time_domain_detector_response` and added to the stored
-        time series; parts of the signal outside the data are dropped. If the
-        autocovariance function is set, the optimal and matched-filter SNRs
-        over the data are stored in :code:`meta_data`.
+        The detector signal is projected and placed as in
+        :code:`get_time_domain_detector_response` and added to all of the
+        stored time series; parts of the signal outside the data are dropped.
+        If the autocovariance function is set, the optimal and matched-filter
+        SNRs in the analysis window are stored in :code:`meta_data`.
         Provide the injection parameters and either the injection
         polarizations or the waveform generator; the injection polarizations
         are used if both are given.
@@ -785,8 +772,9 @@ class Interferometer(object):
             raise ValueError("injection_polarizations must come from a time-domain source model "
                              "(with an 'epoch' entry)")
 
-        signal_ifo = self.get_time_domain_detector_response(
-            injection_polarizations, parameters, placement=placement)
+        signal_ifo = self._time_domain_detector_response(
+            injection_polarizations, parameters, self.strain_data.start_time,
+            len(self.strain_data.time_domain_strain), placement)
         self.strain_data._time_domain_strain = (
             np.array(self.strain_data.time_domain_strain, dtype=float) + signal_ifo)
         self.strain_data._frequency_domain_strain = None

@@ -249,7 +249,7 @@ class InterferometerList(list):
                 raise ValueError(
                     "analysis_segment must be 'imr', 'inspiral' or 'post_inspiral', "
                     f"not {analysis_segment!r}")
-            interferometer.set_analysis_window(window_start, duration)
+            interferometer.analysis_window = (window_start, duration)
             interferometer.meta_data["analysis_window"].update(
                 analysis_segment=analysis_segment, segment_cut_time=segment_cut_time,
                 cut_time=cut_time)
@@ -296,7 +296,7 @@ class InterferometerList(list):
 
     def downsample_strain_data(self, sampling_frequency, **kwargs):
         """Condition and downsample the time-domain strain data of each
-        detector, and crop it to its analysis window.
+        detector around its analysis window.
 
         See :py:meth:`bilby.gw.detector.Interferometer.downsample_strain_data`
         for the keyword arguments.
@@ -308,12 +308,6 @@ class InterferometerList(list):
         """
         for interferometer in self:
             interferometer.downsample_strain_data(sampling_frequency, **kwargs)
-
-    def crop_strain_data(self):
-        """Crop the time-domain strain data of each detector to its analysis
-        window."""
-        for interferometer in self:
-            interferometer.crop_strain_data()
 
     def inject_signal_time_domain(
         self,

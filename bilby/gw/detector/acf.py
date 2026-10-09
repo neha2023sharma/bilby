@@ -6,8 +6,8 @@ from ..time_domain_utils import gohberg_semencul_vectors
 
 class AutoCovarianceFunction(object):
 
-    def __init__(self, acf_array, sampling_frequency, minimum_frequency=None,
-                 maximum_frequency=None, fill_value=None):
+    def __init__(self, acf_array=None, sampling_frequency=None, minimum_frequency=None,
+                 maximum_frequency=None, fill_value=None, fill_multiplier=None):
         """
         Instantiate a new AutoCovarianceFunction object.
 
@@ -32,10 +32,10 @@ class AutoCovarianceFunction(object):
 
         Parameters
         ==========
-        acf_array: array_like
+        acf_array: array_like, optional
             Autocovariance function at lags 0, 1/sampling_frequency,
             2/sampling_frequency, ... (strain^2).
-        sampling_frequency: float
+        sampling_frequency: float, optional
             Sampling frequency of the lags (Hz). Must equal the sampling
             frequency of the data it is used with.
         minimum_frequency: float, optional
@@ -43,45 +43,43 @@ class AutoCovarianceFunction(object):
         maximum_frequency: float, optional
             Upper edge of the frequency band used to compute the ACF (Hz).
         fill_value: float, optional
-            Multiple of the maximum in-band PSD used outside the band.
+            PSD value used outside the band (strain^2 / Hz).
+        fill_multiplier: float, optional
+            Multiple of the maximum in-band PSD used outside the band, if
+            `fill_value` was computed from it.
         """
-        self.acf_array = np.asarray(acf_array, dtype=float)
-        self.sampling_frequency = float(sampling_frequency)
+        self.acf_array = None if acf_array is None else np.asarray(acf_array, dtype=float)
+        self.sampling_frequency = None if sampling_frequency is None else float(sampling_frequency)
         self.minimum_frequency = minimum_frequency
         self.maximum_frequency = maximum_frequency
         self.fill_value = fill_value
-
-    @property
-    def number_of_samples(self):
-        """ Number of lags in the ACF. """
-        return len(self.acf_array)
-
-    @property
-    def duration(self):
-        """ Duration of the ACF (s). """
-        return self.number_of_samples / self.sampling_frequency
+        self.fill_multiplier = fill_multiplier
 
     @property
     def meta_data(self):
+        duration = None
+        if self.acf_array is not None and self.sampling_frequency is not None:
+            duration = len(self.acf_array) / self.sampling_frequency
         return dict(
             sampling_frequency=self.sampling_frequency,
-            duration=self.duration,
+            duration=duration,
             minimum_frequency=self.minimum_frequency,
             maximum_frequency=self.maximum_frequency,
             fill_value=self.fill_value,
+            fill_multiplier=self.fill_multiplier,
         )
 
     @classmethod
     def from_power_spectral_density_array(
             cls, frequency_array, psd_array, minimum_frequency, maximum_frequency,
-            sampling_frequency=None, fill_value=1e4):
+            sampling_frequency=None, fill_value=None, fill_multiplier=1e4):
         """ Compute the ACF from a one-sided power spectral density.
 
         The PSD below `minimum_frequency` and above `maximum_frequency` is set
-        to `fill_value` times its maximum value in
-        [`minimum_frequency`, `maximum_frequency`]. If `frequency_array` does
-        not start at 0 Hz, bins down to 0 Hz are added and set to the same
-        value. The ACF is then
+        to `fill_value` or, if it is not given, to `fill_multiplier` times its
+        maximum value in [`minimum_frequency`, `maximum_frequency`]. If
+        `frequency_array` does not start at 0 Hz, bins down to 0 Hz are added
+        and set to the same value. The ACF is then
 
         .. math::
 
@@ -105,9 +103,12 @@ class AutoCovarianceFunction(object):
             Sampling frequency of the data (Hz). If it differs from twice the
             highest frequency in `frequency_array`, a warning is logged and
             the latter is used.
-        fill_value: float
-            Multiple of the maximum in-band PSD used outside the band
-            (default 1e4).
+        fill_value: float, optional
+            PSD value used outside the band (strain^2 / Hz). Overrides
+            `fill_multiplier`.
+        fill_multiplier: float
+            Multiple of the maximum in-band PSD used outside the band if
+            `fill_value` is not given (default 1e4).
 
         Returns
         =======
@@ -116,10 +117,11 @@ class AutoCovarianceFunction(object):
         frequency_array = np.asarray(frequency_array, dtype=float)
         psd_array = np.asarray(psd_array, dtype=float)
         delta_f = frequency_array[1] - frequency_array[0]
-        number_missing = int(round(frequency_array[0] / delta_f))
-        if number_missing > 0:
-            frequency_array = np.concatenate([np.arange(number_missing) * delta_f, frequency_array])
-            psd_array = np.concatenate([np.zeros(number_missing), psd_array])
+        frequency_values_missing = int(round(frequency_array[0] / delta_f))
+        if frequency_values_missing > 0:
+            frequency_array = np.concatenate(
+                [np.arange(frequency_values_missing) * delta_f, frequency_array])
+            psd_array = np.concatenate([np.zeros(frequency_values_missing), psd_array])
 
         psd_sampling_frequency = 2 * frequency_array[-1]
         if sampling_frequency is not None and not np.isclose(
@@ -132,17 +134,22 @@ class AutoCovarianceFunction(object):
                 "and SNR values.")
 
         band = (frequency_array >= minimum_frequency) & (frequency_array <= maximum_frequency)
+        if fill_value is None:
+            fill_value = fill_multiplier * np.max(psd_array[band])
+        else:
+            fill_multiplier = None
         psd_array = psd_array.copy()
-        psd_array[~band] = fill_value * np.max(psd_array[band])
+        psd_array[~band] = fill_value
         acf_array = 0.5 * np.fft.irfft(psd_array) * psd_sampling_frequency
         return cls(acf_array=acf_array, sampling_frequency=psd_sampling_frequency,
                    minimum_frequency=minimum_frequency, maximum_frequency=maximum_frequency,
-                   fill_value=fill_value)
+                   fill_value=float(fill_value), fill_multiplier=fill_multiplier)
 
     @classmethod
     def from_time_domain_strain(
             cls, time_domain_strain, sampling_frequency, analysis_duration, minimum_frequency,
-            maximum_frequency, segment_duration=None, duration_factor=16, fill_value=1e4):
+            maximum_frequency, segment_duration=None, duration_factor=16, fill_value=None,
+            fill_multiplier=1e4):
         """ Estimate the ACF from noise data.
 
         The PSD of the data is estimated with Welch's method (Hann window, 50%
@@ -167,9 +174,12 @@ class AutoCovarianceFunction(object):
             samples.
         duration_factor: float
             See `segment_duration` (default 16).
-        fill_value: float
-            Multiple of the maximum in-band PSD used outside the band
-            (default 1e4).
+        fill_value: float, optional
+            PSD value used outside the band (strain^2 / Hz). Overrides
+            `fill_multiplier`.
+        fill_multiplier: float
+            Multiple of the maximum in-band PSD used outside the band if
+            `fill_value` is not given (default 1e4).
 
         Returns
         =======
@@ -185,7 +195,8 @@ class AutoCovarianceFunction(object):
             average="median")
         return cls.from_power_spectral_density_array(
             frequency_array, psd_array, minimum_frequency, maximum_frequency,
-            sampling_frequency=sampling_frequency, fill_value=fill_value)
+            sampling_frequency=sampling_frequency, fill_value=fill_value,
+            fill_multiplier=fill_multiplier)
 
     @classmethod
     def from_file(cls, filename, sampling_frequency=None):
@@ -227,13 +238,13 @@ class AutoCovarianceFunction(object):
         =======
         array_like: The first row of the segment's covariance matrix.
         """
-        if number_of_samples > self.number_of_samples:
+        if number_of_samples > len(self.acf_array):
             raise ValueError(
                 f"The analysis segment ({number_of_samples} samples) is longer than the ACF "
-                f"({self.number_of_samples} samples)")
-        if 2 * number_of_samples > self.number_of_samples:
+                f"({len(self.acf_array)} samples)")
+        if 2 * number_of_samples > len(self.acf_array):
             logger.warning(
-                f"The ACF ({self.number_of_samples} samples) is shorter than twice the analysis "
+                f"The ACF ({len(self.acf_array)} samples) is shorter than twice the analysis "
                 f"segment ({number_of_samples} samples)")
         return self.acf_array[:number_of_samples]
 
@@ -261,7 +272,7 @@ class AutoCovarianceFunction(object):
         filename: str
             Name of the output file.
         """
-        lags = np.arange(self.number_of_samples) / self.sampling_frequency
+        lags = np.arange(len(self.acf_array)) / self.sampling_frequency
         np.savetxt(filename, np.array([lags, self.acf_array]).T, header="lag acf")
 
 

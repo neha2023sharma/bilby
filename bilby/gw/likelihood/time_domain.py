@@ -2,7 +2,7 @@ import copy
 
 import numpy as np
 
-from ..time_domain_utils import PLACEMENT_METHODS, GohbergSemenculInverse
+from ..time_domain_utils import PLACEMENT_METHODS
 from .base import GravitationalWaveTransient
 
 
@@ -11,9 +11,9 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
 
     The noise in each interferometer is a stationary Gaussian process with
     covariance matrix :math:`C_{ij} = \\rho(|i - j|)`, where :math:`\\rho` is
-    the autocovariance function (ACF) of the interferometer. For the strain
-    data :math:`d` and a template :math:`h` in the analysis window of each
-    interferometer
+    the autocovariance function (ACF) of the interferometer. For the data in
+    the analysis window, :math:`d` (:code:`interferometer.analysis_data`), and
+    a template :math:`h` on the same samples
 
     .. math::
 
@@ -22,7 +22,8 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
 
     :code:`log_likelihood_ratio` returns the first two terms and
     :code:`noise_log_likelihood` the last. :math:`C^{-1}` is applied with the
-    Gohberg-Semencul vectors stored on each interferometer.
+    operator stored on each interferometer
+    (:code:`interferometer.inverse_covariance`).
 
     The template is projected onto each interferometer and placed so that the
     model's t=0 arrives at geocent_time plus the time delay from the
@@ -32,7 +33,7 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
     ==========
     interferometers: list, bilby.gw.detector.InterferometerList
         A list of :code:`bilby.gw.detector.Interferometer` instances, each with
-        an analysis window, time-domain strain data in that window and an
+        an analysis window, time-domain strain data covering it and an
         autocovariance function.
     waveform_generator: bilby.gw.waveform_generator.WaveformGenerator
         A WaveformGenerator with a time-domain source model, e.g.
@@ -118,14 +119,12 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
                 self.priors, self.placement))
 
     def _setup_noise_model(self):
-        """ Inverse covariance operator, d^T C^-1 and d^T C^-1 d for each
-        interferometer. """
-        self._inverse_covariance = dict()
+        """ d^T C^-1 and d^T C^-1 d for each interferometer. """
         self._data_times_inverse_covariance = dict()
         self._data_inverse_covariance_data = dict()
         for interferometer in self.interferometers:
             acf = interferometer.autocovariance_function
-            if acf is None:
+            if acf is None or acf.acf_array is None:
                 raise ValueError(f"{interferometer.name}: no autocovariance_function set")
             if not np.isclose(acf.sampling_frequency, interferometer.sampling_frequency,
                               rtol=1e-9, atol=0):
@@ -133,15 +132,8 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
                     f"{interferometer.name}: autocovariance function sampling frequency "
                     f"{acf.sampling_frequency:g} Hz differs from the data's "
                     f"{interferometer.sampling_frequency:g} Hz")
-            data = np.asarray(interferometer.time_domain_strain, dtype=float)
-            x, y = interferometer.gohberg_semencul_vectors
-            if len(x) != len(data):
-                raise ValueError(
-                    f"{interferometer.name}: the data have {len(data)} samples but the analysis "
-                    f"window has {len(x)}; crop the data to the analysis window")
-            inverse_covariance = GohbergSemenculInverse(x, y)
-            data_times_inverse_covariance = inverse_covariance(data)
-            self._inverse_covariance[interferometer.name] = inverse_covariance
+            data = interferometer.analysis_data
+            data_times_inverse_covariance = interferometer.inverse_covariance(data)
             self._data_times_inverse_covariance[interferometer.name] = data_times_inverse_covariance
             self._data_inverse_covariance_data[interferometer.name] = float(
                 np.dot(data_times_inverse_covariance, data))
@@ -159,7 +151,7 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
 
         Returns
         =======
-        array_like: The template on the data samples.
+        array_like: The template on the samples of the analysis window.
         """
         return interferometer.get_time_domain_detector_response(
             signal_polarizations, parameters, placement=self.placement)
@@ -188,7 +180,7 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
             parameters=parameters,
         )
         d_inner_h = float(np.dot(self._data_times_inverse_covariance[interferometer.name], signal))
-        optimal_snr_squared = float(np.dot(signal, self._inverse_covariance[interferometer.name](signal)))
+        optimal_snr_squared = float(np.dot(signal, interferometer.inverse_covariance(signal)))
         if optimal_snr_squared > 0:
             matched_filter_snr = d_inner_h / optimal_snr_squared ** 0.5
         else:
@@ -249,10 +241,8 @@ class TimeDomainGravitationalWaveTransient(GravitationalWaveTransient):
         """
         if not self.distance_marginalization:
             return parameters
-        signal_polarizations = copy.deepcopy(
-            self.waveform_generator.time_domain_strain(parameters))
         parameters['luminosity_distance'] = self.generate_distance_sample_from_marginalized_likelihood(
-            signal_polarizations=signal_polarizations, parameters=parameters)
+            parameters=parameters)
         return parameters.copy()
 
     def generate_distance_sample_from_marginalized_likelihood(
